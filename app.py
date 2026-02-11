@@ -2044,26 +2044,22 @@ with col_tutor:
         if 'pdf_type' not in st.session_state:
             st.session_state.pdf_type = "semplice" if not PLAYWRIGHT_AVAILABLE else "avanzato"
         
-        # Mostra sempre entrambe le opzioni
-        pdf_type_choice = st.radio(
-            "Tipo PDF:",
-            ["Avanzato (con grafico)", "Semplice (massima compatibilità)"],
-            index=0 if st.session_state.pdf_type == "avanzato" else 1,
-            help="PDF Avanzato: include grafico e formule LaTeX (potrebbe non aprirsi su iOS). PDF Semplice: solo testo, compatibile con tutti i dispositivi."
-        )
-        st.session_state.pdf_type = "avanzato" if "Avanzato" in pdf_type_choice else "semplice"
-        
-        # Avviso se Playwright non disponibile ma selezionato PDF Avanzato
-        if st.session_state.pdf_type == "avanzato" and not PLAYWRIGHT_AVAILABLE:
-            st.warning("⚠️ Playwright non installato. Installa con: `pip3 install playwright==1.30.0` poi `python3 -m playwright install chromium`")
+        # Selezione tipo PDF (solo se Playwright disponibile)
+        if PLAYWRIGHT_AVAILABLE:
+            pdf_type_choice = st.radio(
+                "Tipo PDF:",
+                ["Avanzato (con grafico)", "Semplice (massima compatibilità)"],
+                index=0 if st.session_state.pdf_type == "avanzato" else 1,
+                help="PDF Avanzato: include grafico e formule LaTeX (potrebbe non aprirsi su iOS). PDF Semplice: solo testo, compatibile con tutti i dispositivi."
+            )
+            st.session_state.pdf_type = "avanzato" if "Avanzato" in pdf_type_choice else "semplice"
+        else:
+            # Playwright non disponibile - usa solo fpdf2
+            st.info("ℹ️ Playwright non disponibile (richiede macOS 13+). Usa PDF Semplice (compatibile con tutti i dispositivi).")
+            st.session_state.pdf_type = "semplice"
         
         # Bottone per generare il PDF
         if st.button("🔄 Genera Report PDF", type="primary", use_container_width=True):
-            # Controlla se può generare PDF avanzato
-            if st.session_state.pdf_type == "avanzato" and not PLAYWRIGHT_AVAILABLE:
-                st.error("❌ PDF Avanzato richiede Playwright. Usa PDF Semplice o installa Playwright.")
-                st.stop()
-            
             with st.spinner("⏳ Generazione PDF in corso... Attendi qualche secondo..."):
                 if st.session_state.pdf_type == "semplice":
                     # Usa fpdf2 per PDF semplice ma universalmente compatibile
