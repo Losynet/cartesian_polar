@@ -1,5 +1,15 @@
-streamlit
-pandas
-numpy
-plotly
-playwright
+# Framework Web
+streamlit>=1.28.0
+
+# Grafici Interattivi
+plotly>=5.17.0
+
+# Calcoli Numerici
+numpy>=1.24.0
+
+# Gestione Dati
+pandas>=2.0.0
+
+# Generazione e Ottimizzazione PDF
+playwright>=1.40.0
+PyPDF2>=3.0.0
