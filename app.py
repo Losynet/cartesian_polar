@@ -23,6 +23,12 @@ try:
 except ImportError:
     PYPDF2_AVAILABLE = False
 
+try:
+    from fpdf import FPDF
+    FPDF_AVAILABLE = True
+except ImportError:
+    FPDF_AVAILABLE = False
+
 
 # --- CONFIGURAZIONE ---
 st.set_page_config(layout="wide", page_title="GeoSolver v67 - Prof. Losenno")
@@ -819,6 +825,89 @@ def generate_pdf_report(log_entries, solved_values, student_surname, student_nam
         except:
             # Se anche questo fallisce, restituisci bytes con messaggio
             return error_msg.encode('utf-8')
+
+
+def generate_simple_pdf_report(log_entries, solved_values, student_surname, student_name):
+    """
+    Genera un PDF semplice ma universalmente compatibile usando fpdf2.
+    Usato come fallback se Playwright genera PDF non compatibili.
+    """
+    if not FPDF_AVAILABLE:
+        return b"PDF Error: fpdf2 not installed. Install with: pip install fpdf2"
+    
+    try:
+        pdf = FPDF()
+        pdf.add_page()
+        
+        # Titolo
+        pdf.set_font('Arial', 'B', 16)
+        pdf.cell(0, 10, 'Report GeoSolver - Esercizio Topografia', 0, 1, 'C')
+        
+        pdf.set_font('Arial', '', 10)
+        pdf.cell(0, 6, 'Prof. G. Losenno - Prof. E. D\'Aranno', 0, 1, 'C')
+        pdf.ln(5)
+        
+        # Info studente
+        pdf.set_font('Arial', 'B', 12)
+        pdf.cell(0, 8, f'Studente: {student_surname} {student_name}', 0, 1)
+        
+        # Data
+        now = datetime.now()
+        pdf.set_font('Arial', '', 10)
+        pdf.cell(0, 6, f'Data: {now.strftime("%d/%m/%Y %H:%M")}', 0, 1)
+        pdf.ln(5)
+        
+        # Linea separatrice
+        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+        pdf.ln(5)
+        
+        # Passaggi
+        pdf.set_font('Arial', 'B', 14)
+        pdf.cell(0, 8, 'Passaggi Risoluzione:', 0, 1)
+        pdf.ln(2)
+        
+        pdf.set_font('Arial', '', 10)
+        
+        for i, entry in enumerate(log_entries, 1):
+            # Numero step
+            pdf.set_font('Arial', 'B', 10)
+            pdf.cell(0, 6, f'Step {i}: {entry.get("action", "N/A")}', 0, 1)
+            
+            # Metodo
+            pdf.set_font('Arial', 'I', 9)
+            method = entry.get('method', 'N/A')
+            # Rimuovi comandi LaTeX per compatibilità
+            method_clean = method.replace('$', '').replace('\\', '').replace('overline', '').replace('{', '').replace('}', '')
+            pdf.cell(0, 5, f'Metodo: {method_clean[:80]}', 0, 1)
+            
+            # Risultato (semplificato, senza LaTeX)
+            result = entry.get('result', 'N/A')
+            if isinstance(result, str) and len(result) < 200:
+                result_clean = result.replace('$', '').replace('\\', '').replace('{', '').replace('}', '')
+                pdf.set_font('Arial', '', 9)
+                pdf.multi_cell(0, 5, f'Risultato: {result_clean[:150]}')
+            
+            pdf.ln(2)
+            
+            # Previeni overflow pagina
+            if pdf.get_y() > 250:
+                pdf.add_page()
+        
+        # Footer
+        pdf.ln(5)
+        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+        pdf.ln(2)
+        pdf.set_font('Arial', 'I', 8)
+        pdf.cell(0, 5, 'Report generato automaticamente da GeoSolver v67', 0, 1, 'C')
+        
+        # Output PDF
+        return pdf.output(dest='S').encode('latin-1')
+        
+    except Exception as e:
+        import traceback
+        error_msg = f"Errore generazione PDF semplice: {str(e)}\n{traceback.format_exc()}"
+        print(error_msg)
+        return error_msg.encode('utf-8')
 
 
 
@@ -1942,17 +2031,38 @@ with col_tutor:
             st.session_state.pdf_ready = False
         if 'pdf_data' not in st.session_state:
             st.session_state.pdf_data = None
+        if 'pdf_type' not in st.session_state:
+            st.session_state.pdf_type = "avanzato"
+        
+        # Selezione tipo PDF
+        pdf_type_choice = st.radio(
+            "Tipo PDF:",
+            ["Avanzato (con grafico)", "Semplice (massima compatibilità)"],
+            index=0 if st.session_state.pdf_type == "avanzato" else 1,
+            help="PDF Avanzato: include grafico e formule LaTeX (potrebbe non aprirsi su iOS). PDF Semplice: solo testo, compatibile con tutti i dispositivi."
+        )
+        st.session_state.pdf_type = "avanzato" if "Avanzato" in pdf_type_choice else "semplice"
         
         # Bottone per generare il PDF
         if st.button("🔄 Genera Report PDF", type="primary", use_container_width=True):
             with st.spinner("⏳ Generazione PDF in corso... Attendi qualche secondo..."):
-                st.session_state.pdf_data = generate_pdf_report(
-                    st.session_state.log, 
-                    st.session_state.solved_values, 
-                    cognome_original, 
-                    nome_original,
-                    st.session_state.get('current_fig', None)
-                )
+                if st.session_state.pdf_type == "semplice":
+                    # Usa fpdf2 per PDF semplice ma universalmente compatibile
+                    st.session_state.pdf_data = generate_simple_pdf_report(
+                        st.session_state.log, 
+                        st.session_state.solved_values, 
+                        cognome_original, 
+                        nome_original
+                    )
+                else:
+                    # Usa Playwright per PDF avanzato con grafico
+                    st.session_state.pdf_data = generate_pdf_report(
+                        st.session_state.log, 
+                        st.session_state.solved_values, 
+                        cognome_original, 
+                        nome_original,
+                        st.session_state.get('current_fig', None)
+                    )
                 st.session_state.pdf_ready = True
                 st.rerun()
         
