@@ -10,6 +10,9 @@ numpy>=1.24.0
 # Gestione Dati
 pandas>=2.0.0
 
-# Generazione e Ottimizzazione PDF
+# Generazione PDF (Avanzato con grafico)
 playwright>=1.40.0
 PyPDF2>=3.0.0
+
+# Generazione PDF (Semplice, massima compatibilità)
+fpdf2>=2.7.0
