@@ -9,11 +9,19 @@ import base64
 from datetime import datetime
 from io import BytesIO
 import asyncio
+
+# Import opzionali
 try:
     from playwright.sync_api import sync_playwright
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
+
+try:
+    from PyPDF2 import PdfReader, PdfWriter
+    PYPDF2_AVAILABLE = True
+except ImportError:
+    PYPDF2_AVAILABLE = False
 
 
 # --- CONFIGURAZIONE ---
@@ -703,16 +711,20 @@ def generate_pdf_report(log_entries, solved_values, student_surname, student_nam
     try:
         # Usa Playwright per convertire HTML in PDF (come un browser)
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            # Aumenta il timeout per l'installazione del browser
+            browser = p.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-setuid-sandbox']  # Fix per alcuni ambienti
+            )
             page = browser.new_page()
             
-            # Carica l'HTML
-            page.set_content(html_content, wait_until='networkidle')
+            # Carica l'HTML con timeout più lungo
+            page.set_content(html_content, wait_until='networkidle', timeout=60000)  # 60 secondi
             
-            # Aspetta che MathJax renderizzi le formule (ridotto a 1 secondo)
-            page.wait_for_timeout(1000)  # 1 secondo per MathJax (ottimizzato!)
+            # Aspetta che MathJax renderizzi le formule (aumentato a 3 secondi)
+            page.wait_for_timeout(3000)  # 3 secondi per MathJax
             
-            # Genera il PDF (come "Stampa in PDF")
+            # Genera il PDF con impostazioni per massima compatibilità
             pdf_bytes = page.pdf(
                 format='A4',
                 print_background=True,
@@ -721,15 +733,92 @@ def generate_pdf_report(log_entries, solved_values, student_surname, student_nam
                     'right': '1cm',
                     'bottom': '1cm',
                     'left': '1cm'
-                }
+                },
+                prefer_css_page_size=False,
+                display_header_footer=False,
+                scale=1.0,  # Scala 100% per evitare problemi rendering
+                landscape=False,  # Orientamento verticale
             )
             
+            # Post-processing: Verifica e ottimizza il PDF per compatibilità
+            # Alcuni viewer hanno problemi con PDF generati da Chromium
+            # Salviamo e rileggiamo per normalizzare il formato
+            try:
+                import io
+                # Verifica che sia un PDF valido leggendo l'header
+                if pdf_bytes[:4] != b'%PDF':
+                    raise Exception("PDF header non valido")
+            except Exception as e:
+                print(f"Warning: PDF potrebbe avere problemi di compatibilità: {e}")
+            
             browser.close()
+            
+            # Verifica che il PDF non sia vuoto
+            if not pdf_bytes or len(pdf_bytes) < 100:
+                raise Exception("PDF generato è vuoto o troppo piccolo")
+            
+            # Post-processing con PyPDF2 per compatibilità universale
+            if PYPDF2_AVAILABLE:
+                try:
+                    # Leggi il PDF generato da Playwright
+                    pdf_reader = PdfReader(BytesIO(pdf_bytes))
+                    pdf_writer = PdfWriter()
+                    
+                    # Copia tutte le pagine (questo "pulisce" il PDF)
+                    for page in pdf_reader.pages:
+                        pdf_writer.add_page(page)
+                    
+                    # Aggiungi metadata per compatibilità
+                    pdf_writer.add_metadata({
+                        '/Title': 'Report GeoSolver',
+                        '/Author': 'Prof. G. Losenno - Prof. E. D\'Aranno',
+                        '/Creator': 'GeoSolver - Topografia Didattica',
+                        '/Producer': 'GeoSolver v67'
+                    })
+                    
+                    # Scrivi il PDF "pulito"
+                    output_buffer = BytesIO()
+                    pdf_writer.write(output_buffer)
+                    pdf_bytes_cleaned = output_buffer.getvalue()
+                    
+                    print(f"PDF ottimizzato con PyPDF2: {len(pdf_bytes)} → {len(pdf_bytes_cleaned)} bytes")
+                    return pdf_bytes_cleaned
+                    
+                except Exception as e:
+                    print(f"Warning: PyPDF2 post-processing fallito: {e}")
+                    # Se fallisce, usa il PDF originale
+                    return pdf_bytes
+            
             return pdf_bytes
             
     except Exception as e:
-        error_msg = f"Errore generazione PDF: {str(e)}"
-        return error_msg.encode()
+        # Log dell'errore più dettagliato
+        import traceback
+        error_msg = f"Errore generazione PDF: {str(e)}\n{traceback.format_exc()}"
+        print(error_msg)  # Stampa nel terminale per debug
+        
+        # Crea un PDF di errore minimale
+        error_html = f"""
+        <html>
+        <head><title>Errore PDF</title></head>
+        <body>
+        <h1>Errore nella generazione del PDF</h1>
+        <p>{str(e)}</p>
+        <p>Verifica che Chromium sia installato: <code>py -m playwright install chromium</code></p>
+        </body>
+        </html>
+        """
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page()
+                page.set_content(error_html)
+                pdf_bytes = page.pdf(format='A4')
+                browser.close()
+                return pdf_bytes
+        except:
+            # Se anche questo fallisce, restituisci bytes con messaggio
+            return error_msg.encode('utf-8')
 
 
 
@@ -1869,15 +1958,35 @@ with col_tutor:
         
         # Se il PDF è pronto, mostra il bottone di download
         if st.session_state.pdf_ready and st.session_state.pdf_data:
-            st.success("✅ PDF generato con successo!")
-            st.download_button(
-                "📄 Scarica Report PDF", 
-                data=st.session_state.pdf_data,
-                file_name=report_filename, 
-                mime="application/pdf",
-                use_container_width=True,
-                help="Clicca per scaricare il report PDF"
-            )
+            # Verifica che il PDF sia valido
+            pdf_size = len(st.session_state.pdf_data) if st.session_state.pdf_data else 0
+            
+            if pdf_size > 100:  # PDF valido (almeno 100 bytes)
+                st.success(f"✅ PDF generato con successo! ({pdf_size // 1024} KB)")
+                st.download_button(
+                    "📄 Scarica Report PDF", 
+                    data=st.session_state.pdf_data,
+                    file_name=report_filename, 
+                    mime="application/pdf",
+                    use_container_width=True,
+                    help="Clicca per scaricare il report PDF"
+                )
+            else:
+                # PDF troppo piccolo o corrotto
+                st.error("❌ Errore: PDF generato non valido")
+                st.warning("Possibili cause:")
+                st.info("1. Chromium non installato: `py -m playwright install chromium`")
+                st.info("2. Problema di rendering MathJax")
+                
+                # Mostra il contenuto per debug (se è testo)
+                if pdf_size < 1000:
+                    try:
+                        error_text = st.session_state.pdf_data.decode('utf-8')
+                        with st.expander("🔍 Dettagli errore"):
+                            st.code(error_text)
+                    except:
+                        pass
+            
             # Aggiungi un bottone per rigenerare
             if st.button("🔄 Rigenera PDF (se hai fatto modifiche)", use_container_width=True):
                 st.session_state.pdf_ready = False
