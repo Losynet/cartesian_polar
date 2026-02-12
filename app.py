@@ -621,7 +621,41 @@ def generate_html_report(log_entries, solved_values, student_surname, student_na
                 </div>
                 """
     
-    plot_html = fig.to_html(full_html=False, include_plotlyjs='cdn') if fig else "<p style='text-align:center; color:#999; font-style:italic;'>Grafico non disponibile.</p>"
+    # Converti grafico Plotly in immagine statica per compatibilità PDF
+    if fig:
+        try:
+            # Metodo 1: Prova con kaleido (migliore qualità)
+            import plotly.io as pio
+            img_bytes = pio.to_image(fig, format='png', width=1200, height=800)
+            img_base64 = base64.b64encode(img_bytes).decode('utf-8')
+            plot_html = f'<div style="text-align:center;"><img src="data:image/png;base64,{img_base64}" style="max-width:100%; height:auto; border:1px solid #ddd; border-radius:8px;"/></div>'
+            print("✅ Grafico convertito in PNG con kaleido")
+        except Exception as e:
+            print(f"⚠️ Kaleido non disponibile: {e}")
+            try:
+                # Metodo 2: Salva come HTML statico semplificato (senza JavaScript)
+                print("ℹ️ Usando metodo alternativo: HTML statico")
+                # Estrai solo i dati del grafico, senza interattività
+                import json
+                # Crea SVG invece di HTML interattivo
+                svg_str = pio.to_image(fig, format='svg').decode('utf-8')
+                plot_html = f'<div style="text-align:center;">{svg_str}</div>'
+                print("✅ Grafico convertito in SVG")
+            except Exception as e2:
+                print(f"⚠️ Conversione SVG fallita: {e2}")
+                print("ℹ️ Nascondo grafico dal PDF (solo formule)")
+                # Fallback: nessun grafico
+                plot_html = """
+                <div style="text-align:center; padding:40px; background:#f8f9fa; border:2px dashed #ddd; border-radius:8px; margin:20px 0;">
+                    <p style="color:#666; font-size:14px; margin:0;">
+                        📊 <b>Grafico non disponibile nel PDF</b><br>
+                        <small>Visualizza il grafico nell'applicazione web oppure installa kaleido:<br>
+                        <code>pip3 install kaleido</code></small>
+                    </p>
+                </div>
+                """
+    else:
+        plot_html = "<p style='text-align:center; color:#999; font-style:italic;'>Grafico non disponibile.</p>"
     
     # Aggiungi statistiche errori
     total_steps = len(log_entries)
@@ -2044,22 +2078,32 @@ with col_tutor:
         if 'pdf_type' not in st.session_state:
             st.session_state.pdf_type = "semplice" if not PLAYWRIGHT_AVAILABLE else "avanzato"
         
-        # Selezione tipo PDF (solo se Playwright disponibile)
-        if PLAYWRIGHT_AVAILABLE:
-            pdf_type_choice = st.radio(
-                "Tipo PDF:",
-                ["Avanzato (con grafico)", "Semplice (massima compatibilità)"],
-                index=0 if st.session_state.pdf_type == "avanzato" else 1,
-                help="PDF Avanzato: include grafico e formule LaTeX (potrebbe non aprirsi su iOS). PDF Semplice: solo testo, compatibile con tutti i dispositivi."
-            )
-            st.session_state.pdf_type = "avanzato" if "Avanzato" in pdf_type_choice else "semplice"
+        # Mostra sempre entrambe le opzioni
+        pdf_type_choice = st.radio(
+            "Tipo PDF:",
+            ["Avanzato (con grafico)", "Semplice (massima compatibilità)"],
+            index=0 if st.session_state.pdf_type == "avanzato" else 1,
+            help="PDF Avanzato: include grafico e formule LaTeX (solo Mac/Windows). PDF Semplice: solo testo, compatibile con iPad/iPhone/Android."
+        )
+        st.session_state.pdf_type = "avanzato" if "Avanzato" in pdf_type_choice else "semplice"
+        
+        # Messaggio informativo chiaro
+        if st.session_state.pdf_type == "avanzato":
+            st.info("ℹ️ **PDF Avanzato**: Include grafico Plotly e formule LaTeX. Si apre su **Mac/Windows** ma **non su iPad/iPhone**.")
         else:
-            # Playwright non disponibile - usa solo fpdf2
-            st.info("ℹ️ Playwright non disponibile (richiede macOS 13+). Usa PDF Semplice (compatibile con tutti i dispositivi).")
-            st.session_state.pdf_type = "semplice"
+            st.success("✅ **PDF Semplice**: Compatibile con **tutti i dispositivi** (Mac, iPad, iPhone, Android).")
+        
+        # Avviso se Playwright non disponibile ma selezionato PDF Avanzato
+        if st.session_state.pdf_type == "avanzato" and not PLAYWRIGHT_AVAILABLE:
+            st.warning("⚠️ Playwright non installato. Installa con: `pip3 install playwright==1.30.0` poi `python3 -m playwright install chromium`")
         
         # Bottone per generare il PDF
         if st.button("🔄 Genera Report PDF", type="primary", use_container_width=True):
+            # Controlla se può generare PDF avanzato
+            if st.session_state.pdf_type == "avanzato" and not PLAYWRIGHT_AVAILABLE:
+                st.error("❌ PDF Avanzato richiede Playwright. Usa PDF Semplice o installa Playwright.")
+                st.stop()
+            
             with st.spinner("⏳ Generazione PDF in corso... Attendi qualche secondo..."):
                 if st.session_state.pdf_type == "semplice":
                     # Usa fpdf2 per PDF semplice ma universalmente compatibile
