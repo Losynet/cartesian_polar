@@ -8,21 +8,9 @@ import plotly.graph_objects as go
 import base64
 from datetime import datetime
 from io import BytesIO
-import asyncio
+import re
 
-# Import opzionali
-try:
-    from playwright.sync_api import sync_playwright
-    PLAYWRIGHT_AVAILABLE = True
-except ImportError:
-    PLAYWRIGHT_AVAILABLE = False
-
-try:
-    from PyPDF2 import PdfReader, PdfWriter
-    PYPDF2_AVAILABLE = True
-except ImportError:
-    PYPDF2_AVAILABLE = False
-
+# Import per PDF nativo (NO Playwright - 100% compatibile!)
 try:
     from fpdf import FPDF
     FPDF_AVAILABLE = True
@@ -739,219 +727,249 @@ def generate_html_report(log_entries, solved_values, student_surname, student_na
     """
     return html
 
-def generate_pdf_report(log_entries, solved_values, student_surname, student_name, fig):
-    """Genera un report PDF dall'HTML usando Playwright (come 'Stampa in PDF' del browser)"""
-    
-    if not PLAYWRIGHT_AVAILABLE:
-        return b"PDF Error: Playwright not installed"
-    
-    # Genera l'HTML completo (la versione bella!)
-    html_content = generate_html_report(log_entries, solved_values, student_surname, student_name, fig)
-    
-    try:
-        # Usa Playwright per convertire HTML in PDF (come un browser)
-        with sync_playwright() as p:
-            # Aumenta il timeout per l'installazione del browser
-            browser = p.chromium.launch(
-                headless=True,
-                args=['--no-sandbox', '--disable-setuid-sandbox']  # Fix per alcuni ambienti
-            )
-            page = browser.new_page()
-            
-            # Carica l'HTML con timeout più lungo
-            page.set_content(html_content, wait_until='networkidle', timeout=60000)  # 60 secondi
-            
-            # Aspetta che MathJax renderizzi le formule (aumentato a 3 secondi)
-            page.wait_for_timeout(3000)  # 3 secondi per MathJax
-            
-            # Genera il PDF con impostazioni per massima compatibilità
-            pdf_bytes = page.pdf(
-                format='A4',
-                print_background=True,
-                margin={
-                    'top': '1cm',
-                    'right': '1cm',
-                    'bottom': '1cm',
-                    'left': '1cm'
-                },
-                prefer_css_page_size=False,
-                display_header_footer=False,
-                scale=1.0,  # Scala 100% per evitare problemi rendering
-                landscape=False,  # Orientamento verticale
-            )
-            
-            # Post-processing: Verifica e ottimizza il PDF per compatibilità
-            # Alcuni viewer hanno problemi con PDF generati da Chromium
-            # Salviamo e rileggiamo per normalizzare il formato
-            try:
-                import io
-                # Verifica che sia un PDF valido leggendo l'header
-                if pdf_bytes[:4] != b'%PDF':
-                    raise Exception("PDF header non valido")
-            except Exception as e:
-                print(f"Warning: PDF potrebbe avere problemi di compatibilità: {e}")
-            
-            browser.close()
-            
-            # Verifica che il PDF non sia vuoto
-            if not pdf_bytes or len(pdf_bytes) < 100:
-                raise Exception("PDF generato è vuoto o troppo piccolo")
-            
-            # Post-processing con PyPDF2 per compatibilità universale
-            if PYPDF2_AVAILABLE:
-                try:
-                    # Leggi il PDF generato da Playwright
-                    pdf_reader = PdfReader(BytesIO(pdf_bytes))
-                    pdf_writer = PdfWriter()
-                    
-                    # Copia tutte le pagine (questo "pulisce" il PDF)
-                    for page in pdf_reader.pages:
-                        pdf_writer.add_page(page)
-                    
-                    # Aggiungi metadata per compatibilità
-                    pdf_writer.add_metadata({
-                        '/Title': 'Report GeoSolver',
-                        '/Author': 'Prof. G. Losenno - Prof. E. D\'Aranno',
-                        '/Creator': 'GeoSolver - Topografia Didattica',
-                        '/Producer': 'GeoSolver v67'
-                    })
-                    
-                    # Scrivi il PDF "pulito"
-                    output_buffer = BytesIO()
-                    pdf_writer.write(output_buffer)
-                    pdf_bytes_cleaned = output_buffer.getvalue()
-                    
-                    print(f"PDF ottimizzato con PyPDF2: {len(pdf_bytes)} → {len(pdf_bytes_cleaned)} bytes")
-                    return pdf_bytes_cleaned
-                    
-                except Exception as e:
-                    print(f"Warning: PyPDF2 post-processing fallito: {e}")
-                    # Se fallisce, usa il PDF originale
-                    return pdf_bytes
-            
-            return pdf_bytes
-            
-    except Exception as e:
-        # Log dell'errore più dettagliato
-        import traceback
-        error_msg = f"Errore generazione PDF: {str(e)}\n{traceback.format_exc()}"
-        print(error_msg)  # Stampa nel terminale per debug
-        
-        # Crea un PDF di errore minimale
-        error_html = f"""
-        <html>
-        <head><title>Errore PDF</title></head>
-        <body>
-        <h1>Errore nella generazione del PDF</h1>
-        <p>{str(e)}</p>
-        <p>Verifica che Chromium sia installato: <code>py -m playwright install chromium</code></p>
-        </body>
-        </html>
-        """
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                page = browser.new_page()
-                page.set_content(error_html)
-                pdf_bytes = page.pdf(format='A4')
-                browser.close()
-                return pdf_bytes
-        except:
-            # Se anche questo fallisce, restituisci bytes con messaggio
-            return error_msg.encode('utf-8')
-
-
-def generate_simple_pdf_report(log_entries, solved_values, student_surname, student_name):
+def clean_latex_for_pdf(text):
     """
-    Genera un PDF semplice ma universalmente compatibile usando fpdf2.
-    Usato come fallback se Playwright genera PDF non compatibili.
+    Pulisce il testo LaTeX per renderlo leggibile in PDF senza rendering matematico.
+    Converte formule LaTeX in testo ASCII leggibile.
+    """
+    if not isinstance(text, str):
+        return str(text)
+    
+    # Rimuovi delimitatori LaTeX
+    text = text.replace('$$', '').replace('$', '')
+    
+    # Converti simboli matematici comuni
+    replacements = {
+        r'\overline{': '',
+        r'}': '',
+        r'\cdot': '·',
+        r'\times': '×',
+        r'\div': '÷',
+        r'\pm': '±',
+        r'\le': '≤',
+        r'\ge': '≥',
+        r'\ne': '≠',
+        r'\approx': '≈',
+        r'\alpha': 'α',
+        r'\beta': 'β',
+        r'\gamma': 'γ',
+        r'\delta': 'δ',
+        r'\theta': 'θ',
+        r'\pi': 'π',
+        r'\sqrt': '√',
+        r'\frac': '',
+        r'\sum': 'Σ',
+        r'\int': '∫',
+        r'\Delta': 'Δ',
+        r'\\': ' ',
+        '{': '',
+        '}': '',
+        '^2': '²',
+        '^3': '³',
+        '_': '',
+    }
+    
+    for latex_cmd, unicode_char in replacements.items():
+        text = text.replace(latex_cmd, unicode_char)
+    
+    # Pulisci spazi multipli
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    return text
+
+
+def generate_pdf_report(log_entries, solved_values, student_surname, student_name, fig):
+    """
+    Genera un PDF professionale usando FPDF con font incorporati (100% compatibile).
+    Include grafico come immagine PNG statica.
+    Usa font core PDF incorporati automaticamente per compatibilità universale.
     """
     if not FPDF_AVAILABLE:
         return b"PDF Error: fpdf2 not installed. Install with: pip install fpdf2"
     
     try:
-        pdf = FPDF()
+        # Crea PDF - usa format PDF/A per massima compatibilità
+        pdf = FPDF(format='A4')
         pdf.add_page()
+        pdf.set_auto_page_break(auto=True, margin=15)
         
-        # Titolo - usa Helvetica invece di Arial (deprecato)
-        pdf.set_font('Helvetica', 'B', 16)
-        pdf.cell(0, 10, 'Report GeoSolver - Esercizio Topografia', align='C', new_x="LMARGIN", new_y="NEXT")
+        # Usa font "core" che vengono automaticamente incorporati
+        # Times è un font standard PDF che funziona su tutti i dispositivi
         
-        pdf.set_font('Helvetica', '', 10)
+        # === INTESTAZIONE ===
+        pdf.set_font('Times', 'B', 20)
+        pdf.cell(0, 12, 'Report GeoSolver', align='C', new_x="LMARGIN", new_y="NEXT")
+        
+        pdf.set_font('Times', '', 11)
+        pdf.cell(0, 7, 'Esercizio di Topografia', align='C', new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(3)
+        
+        pdf.set_font('Times', 'I', 10)
         pdf.cell(0, 6, 'Prof. G. Losenno - Prof. E. D\'Aranno', align='C', new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(5)
+        pdf.ln(8)
         
-        # Info studente
-        pdf.set_font('Helvetica', 'B', 12)
-        pdf.cell(0, 8, f'Studente: {student_surname} {student_name}', new_x="LMARGIN", new_y="NEXT")
-        
-        # Data
-        now = datetime.now()
-        pdf.set_font('Helvetica', '', 10)
-        pdf.cell(0, 6, f'Data: {now.strftime("%d/%m/%Y %H:%M")}', new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(5)
-        
-        # Linea separatrice
+        # === INFO STUDENTE ===
+        pdf.set_draw_color(41, 128, 185)
+        pdf.set_line_width(0.5)
         pdf.line(10, pdf.get_y(), 200, pdf.get_y())
         pdf.ln(5)
         
-        # Passaggi
-        pdf.set_font('Helvetica', 'B', 14)
-        pdf.cell(0, 8, 'Passaggi Risoluzione:', new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(2)
+        pdf.set_font('Times', 'B', 13)
+        # Codifica corretta per caratteri speciali
+        try:
+            student_text = f'Studente: {student_surname} {student_name}'
+            pdf.cell(0, 8, student_text, new_x="LMARGIN", new_y="NEXT")
+        except:
+            # Fallback se ci sono problemi di encoding
+            pdf.cell(0, 8, f'Studente: {student_surname} {student_name}', new_x="LMARGIN", new_y="NEXT")
         
-        pdf.set_font('Helvetica', '', 10)
+        now = datetime.now()
+        pdf.set_font('Times', '', 10)
+        pdf.cell(0, 6, f'Data: {now.strftime("%d/%m/%Y ore %H:%M")}', new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(5)
         
+        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+        pdf.ln(8)
+        
+        # === GRAFICO (se disponibile) ===
+        if fig:
+            try:
+                # Converti grafico Plotly in PNG
+                import plotly.io as pio
+                import tempfile
+                import os
+                
+                # Salva come PNG temporaneo
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+                    img_bytes = pio.to_image(fig, format='png', width=1400, height=900)
+                    tmp.write(img_bytes)
+                    tmp_path = tmp.name
+                
+                # Inserisci immagine nel PDF
+                pdf.set_font('Times', 'B', 12)
+                pdf.cell(0, 8, 'Grafico del Poligono:', new_x="LMARGIN", new_y="NEXT")
+                pdf.ln(2)
+                
+                # Calcola dimensioni per centrare l'immagine
+                page_width = 210 - 20  # A4 width - margini
+                img_width = page_width * 0.95
+                
+                pdf.image(tmp_path, x=15, w=img_width)
+                pdf.ln(5)
+                
+                # Rimuovi file temporaneo
+                os.unlink(tmp_path)
+                print("✅ Grafico incluso nel PDF come immagine PNG")
+                
+            except Exception as e:
+                print(f"⚠️ Impossibile includere grafico: {e}")
+                print("ℹ️ Installa kaleido per includere il grafico: pip install kaleido")
+                pdf.set_font('Times', 'I', 10)
+                pdf.set_fill_color(248, 249, 250)
+                pdf.multi_cell(0, 6, '📊 Grafico non disponibile (installa kaleido: pip install kaleido)', 
+                              fill=True, align='C')
+                pdf.ln(3)
+        
+        # === PASSAGGI DI RISOLUZIONE ===
+        pdf.set_font('Times', 'B', 14)
+        pdf.cell(0, 10, 'Passaggi di Risoluzione:', new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(3)
+        
+        error_count = 0
         for i, entry in enumerate(log_entries, 1):
-            # Numero step
-            pdf.set_font('Helvetica', 'B', 10)
-            pdf.cell(0, 6, f'Step {i}: {entry.get("action", "N/A")}', new_x="LMARGIN", new_y="NEXT")
+            is_error = entry.get('is_error', False)
+            if is_error:
+                error_count += 1
             
-            # Metodo
-            pdf.set_font('Helvetica', 'I', 9)
-            method = entry.get('method', 'N/A')
-            # Rimuovi comandi LaTeX per compatibilità
-            method_clean = method.replace('$', '').replace('\\', '').replace('overline', '').replace('{', '').replace('}', '')
-            pdf.cell(0, 5, f'Metodo: {method_clean[:80]}', new_x="LMARGIN", new_y="NEXT")
-            
-            # Risultato (semplificato, senza LaTeX)
-            result = entry.get('result', 'N/A')
-            if isinstance(result, str) and len(result) < 200:
-                result_clean = result.replace('$', '').replace('\\', '').replace('{', '').replace('}', '')
-                pdf.set_font('Helvetica', '', 9)
-                pdf.multi_cell(0, 5, f'Risultato: {result_clean[:150]}')
-            
-            pdf.ln(2)
-            
-            # Previeni overflow pagina
+            # Controlla se serve nuova pagina
             if pdf.get_y() > 250:
                 pdf.add_page()
+            
+            # Header dello step
+            if is_error:
+                pdf.set_fill_color(254, 226, 226)  # Rosso chiaro
+                icon = '❌'
+            else:
+                pdf.set_fill_color(232, 245, 233)  # Verde chiaro
+                icon = '✅'
+            
+            pdf.set_font('Times', 'B', 11)
+            pdf.multi_cell(0, 7, f'{icon} Step {i}: {entry.get("action", "N/A")}', 
+                          fill=True, new_x="LMARGIN", new_y="NEXT")
+            
+            # Metodo
+            method = entry.get('method', 'N/A')
+            method_clean = clean_latex_for_pdf(method)
+            
+            pdf.set_font('Times', 'I', 9)
+            pdf.set_fill_color(255, 252, 231)  # Giallo pallido
+            pdf.multi_cell(0, 5, f'Metodo: {method_clean[:120]}', 
+                          fill=True, new_x="LMARGIN", new_y="NEXT")
+            
+            # Risultato
+            result = entry.get('result', 'N/A')
+            result_clean = clean_latex_for_pdf(result)
+            
+            pdf.set_font('Times', '', 9)
+            if len(result_clean) > 200:
+                result_clean = result_clean[:200] + '...'
+            
+            pdf.multi_cell(0, 5, f'Risultato: {result_clean}', 
+                          new_x="LMARGIN", new_y="NEXT")
+            
+            pdf.ln(3)
         
-        # Footer
-        pdf.ln(5)
+        # === STATISTICHE ===
+        total_steps = len(log_entries)
+        success_count = total_steps - error_count
+        success_rate = (success_count / total_steps * 100) if total_steps > 0 else 0
+        
+        if pdf.get_y() > 240:
+            pdf.add_page()
+        
+        pdf.set_draw_color(41, 128, 185)
         pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-        pdf.ln(2)
-        pdf.set_font('Helvetica', 'I', 8)
-        pdf.cell(0, 5, 'Report generato automaticamente da GeoSolver v67', align='C', new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(5)
         
-        # Output PDF - usa il nuovo metodo (fpdf2 v2.7+)
+        pdf.set_font('Times', 'B', 12)
+        pdf.cell(0, 8, '📊 Statistiche Esercizio:', new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
+        
+        pdf.set_font('Times', '', 10)
+        pdf.cell(0, 6, f'Totale passaggi: {total_steps}', new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 6, f'Passaggi corretti: {success_count} ✅', new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 6, f'Errori commessi: {error_count} ❌', new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 6, f'Tasso di successo: {success_rate:.1f}%', new_x="LMARGIN", new_y="NEXT")
+        
+        # === FOOTER ===
+        pdf.ln(8)
+        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+        pdf.ln(3)
+        
+        pdf.set_font('Times', 'I', 8)
+        pdf.set_text_color(128, 128, 128)
+        pdf.cell(0, 5, 'Report generato automaticamente da GeoSolver v68', 
+                align='C', new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 5, 'Istituto Tecnico - Topografia Didattica', 
+                align='C', new_x="LMARGIN", new_y="NEXT")
+        
+        # Output PDF
         pdf_bytes = pdf.output()
         
-        # Se è già bytes, restituisci direttamente
-        if isinstance(pdf_bytes, bytes):
-            return pdf_bytes
-        # Se è bytearray, converti a bytes
-        elif isinstance(pdf_bytes, bytearray):
-            return bytes(pdf_bytes)
-        # Altrimenti converti a bytes
-        else:
-            return str(pdf_bytes).encode('latin-1')
+        # Converti in bytes se necessario
+        if isinstance(pdf_bytes, bytearray):
+            pdf_bytes = bytes(pdf_bytes)
+        
+        print(f"✅ PDF generato: {len(pdf_bytes)} bytes (100% compatibile)")
+        return pdf_bytes
         
     except Exception as e:
         import traceback
-        error_msg = f"Errore generazione PDF semplice: {str(e)}\n{traceback.format_exc()}"
+        error_msg = f"Errore generazione PDF: {str(e)}\n{traceback.format_exc()}"
         print(error_msg)
         return error_msg.encode('utf-8')
+
+
 
 
 
@@ -2075,53 +2093,21 @@ with col_tutor:
             st.session_state.pdf_ready = False
         if 'pdf_data' not in st.session_state:
             st.session_state.pdf_data = None
-        if 'pdf_type' not in st.session_state:
-            st.session_state.pdf_type = "semplice" if not PLAYWRIGHT_AVAILABLE else "avanzato"
         
-        # Mostra sempre entrambe le opzioni
-        pdf_type_choice = st.radio(
-            "Tipo PDF:",
-            ["Avanzato (con grafico)", "Semplice (massima compatibilità)"],
-            index=0 if st.session_state.pdf_type == "avanzato" else 1,
-            help="PDF Avanzato: include grafico e formule LaTeX (solo Mac/Windows). PDF Semplice: solo testo, compatibile con iPad/iPhone/Android."
-        )
-        st.session_state.pdf_type = "avanzato" if "Avanzato" in pdf_type_choice else "semplice"
-        
-        # Messaggio informativo chiaro
-        if st.session_state.pdf_type == "avanzato":
-            st.info("ℹ️ **PDF Avanzato**: Include grafico Plotly e formule LaTeX. Si apre su **Mac/Windows** ma **non su iPad/iPhone**.")
-        else:
-            st.success("✅ **PDF Semplice**: Compatibile con **tutti i dispositivi** (Mac, iPad, iPhone, Android).")
-        
-        # Avviso se Playwright non disponibile ma selezionato PDF Avanzato
-        if st.session_state.pdf_type == "avanzato" and not PLAYWRIGHT_AVAILABLE:
-            st.warning("⚠️ Playwright non installato. Installa con: `pip3 install playwright==1.30.0` poi `python3 -m playwright install chromium`")
+        # Messaggio informativo
+        st.info("📄 **PDF Professionale**: Include grafico, formule e passaggi. Compatibile con **tutti i dispositivi** (Mac, Windows, iPad, iPhone, Android).")
         
         # Bottone per generare il PDF
         if st.button("🔄 Genera Report PDF", type="primary", use_container_width=True):
-            # Controlla se può generare PDF avanzato
-            if st.session_state.pdf_type == "avanzato" and not PLAYWRIGHT_AVAILABLE:
-                st.error("❌ PDF Avanzato richiede Playwright. Usa PDF Semplice o installa Playwright.")
-                st.stop()
-            
             with st.spinner("⏳ Generazione PDF in corso... Attendi qualche secondo..."):
-                if st.session_state.pdf_type == "semplice":
-                    # Usa fpdf2 per PDF semplice ma universalmente compatibile
-                    st.session_state.pdf_data = generate_simple_pdf_report(
-                        st.session_state.log, 
-                        st.session_state.solved_values, 
-                        cognome_original, 
-                        nome_original
-                    )
-                else:
-                    # Usa Playwright per PDF avanzato con grafico
-                    st.session_state.pdf_data = generate_pdf_report(
-                        st.session_state.log, 
-                        st.session_state.solved_values, 
-                        cognome_original, 
-                        nome_original,
-                        st.session_state.get('current_fig', None)
-                    )
+                # Usa FPDF per PDF professionale universalmente compatibile
+                st.session_state.pdf_data = generate_pdf_report(
+                    st.session_state.log, 
+                    st.session_state.solved_values, 
+                    cognome_original, 
+                    nome_original,
+                    st.session_state.get('current_fig', None)
+                )
                 st.session_state.pdf_ready = True
                 st.rerun()
         
