@@ -8,18 +8,28 @@ import plotly.graph_objects as go
 import base64
 from datetime import datetime
 from io import BytesIO
-import re
 
-# Import per PDF nativo (NO Playwright - 100% compatibile!)
+# Import per PDF professionale (ReportLab - Standard industriale)
 try:
-    from fpdf import FPDF
-    FPDF_AVAILABLE = True
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, Table, TableStyle
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    REPORTLAB_AVAILABLE = True
 except ImportError:
-    FPDF_AVAILABLE = False
+    REPORTLAB_AVAILABLE = False
 
+# Import per conversione grafico Plotly in immagine
+try:
+    import plotly.io as pio
+    PLOTLY_IO_AVAILABLE = True
+except ImportError:
+    PLOTLY_IO_AVAILABLE = False
 
 # --- CONFIGURAZIONE ---
-st.set_page_config(layout="wide", page_title="GeoSolver v67 - Prof. Losenno")
+st.set_page_config(layout="wide", page_title="GeoSolver v69 - Prof. Losenno")
 
 # --- CSS ---
 st.markdown(
@@ -32,10 +42,60 @@ st.markdown(
     .stRadio label { font-size: 16px !important; }
     .stInfo { background-color: #e8f4f8; border-left: 5px solid #2980b9; }
     .step-box { background-color: #fff8e1; border-left: 5px solid #f1c40f; padding: 10px; margin-bottom: 10px; border-radius: 5px; }
+    
+    /* CSS per PDF nativo browser - Compatibilità universale */
+    @media print {
+        [data-testid="stSidebar"], [data-testid="stToolbar"], header, footer, 
+        .stDeployButton, .stButton, [data-testid="stNumberInput"], 
+        [data-testid="stSelectbox"], [data-testid="stMultiSelect"],
+        [data-testid="stRadio"], hr, button { display: none !important; }
+        @page { margin: 1.5cm; size: A4 portrait; }
+        body { font-family: 'Helvetica', 'Arial', sans-serif; font-size: 11pt; line-height: 1.4; }
+        .block-container { max-width: 100% !important; padding: 0 !important; }
+        * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+        .step-box, .stInfo, h1, h2, h3 { page-break-inside: avoid; }
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
+
+# --- INIZIALIZZAZIONE SESSION STATE ---
+if 'raw_data' not in st.session_state: st.session_state.raw_data = [] 
+if 'points' not in st.session_state: st.session_state.points = {} 
+if 'log' not in st.session_state: st.session_state.log = []
+if 'projections_visible' not in st.session_state: st.session_state.projections_visible = False 
+if 'solved_items' not in st.session_state: st.session_state.solved_items = set() 
+if 'solved_values' not in st.session_state: st.session_state.solved_values = {} 
+if 'partial_angle_metadata' not in st.session_state: st.session_state.partial_angle_metadata = {}
+if 'current_options' not in st.session_state: st.session_state.current_options = None
+if 'current_mission' not in st.session_state: st.session_state.current_mission = None
+if 'last_calc_msg' not in st.session_state: st.session_state.last_calc_msg = None
+if 'input_interpretation' not in st.session_state: st.session_state.input_interpretation = 'GON'
+if 'ang_method_choice' not in st.session_state: st.session_state.ang_method_choice = None
+if 'selected_partial_suffix' not in st.session_state: st.session_state.selected_partial_suffix = None
+if 'az_segments_confirmed' not in st.session_state: st.session_state.az_segments_confirmed = False
+if 'angle_workflow_target' not in st.session_state: st.session_state.angle_workflow_target = None
+if 'specific_method_choice' not in st.session_state: st.session_state.specific_method_choice = None
+if 'student_name' not in st.session_state: st.session_state.student_name = ""
+if 'student_surname' not in st.session_state: st.session_state.student_surname = ""
+if 'student_class' not in st.session_state: st.session_state.student_class = ""
+
+if 'az_workflow' not in st.session_state:
+    st.session_state.az_workflow = {
+        'active': False,
+        'vertex': None,
+        'step': 0,
+        'side1': None,
+        'side2': None,
+        'az1_val': None,
+        'az2_val': None,
+        'pending_target': None,
+        'quiz_options': None,
+        'partial_suffix': None,
+        'valid_neighbors': None
+    }
+
 def get_strategies_for_mission(mission_code, method_filter=None):
     parts = mission_code.split("_"); act = parts[0] + "_" + parts[1]
     q = {}
@@ -497,6 +557,18 @@ class AngleUnit:
 
 def parse_angle(val, mode):
     try:
+        # Convert string mode to AngleUnit if necessary
+        if isinstance(mode, str):
+            mode_upper = mode.upper()
+            if 'GON' in mode_upper or 'CENTESIMAL' in mode_upper:
+                mode = AngleUnit.GON
+            elif 'DEG' in mode_upper or 'SESSAGESIMAL' in mode_upper:
+                mode = AngleUnit.DEG
+            elif 'RAD' in mode_upper:
+                mode = AngleUnit.RAD
+            else:
+                mode = AngleUnit.GON  # Default
+        
         # If val is a string, try to infer unit from suffix and strip it
         if isinstance(val, str):
             val_clean = val.strip().lower()
@@ -514,6 +586,7 @@ def parse_angle(val, mode):
         if mode == AngleUnit.GON: return val * (math.pi / 200.0)
         elif mode == AngleUnit.DEG: return math.radians(val)
         elif mode == AngleUnit.RAD: return val
+        else: return val * (math.pi / 200.0)  # Default to GON
     except: return 0.0
 
 def format_angle_output(rad_val, unit_mode, latex=False):
@@ -558,6 +631,244 @@ def get_shuffled_options(correct, wrongs):
     return opts
 
 # --- REPORT HTML ---
+def clean_latex_for_text(text):
+    """Rimuove LaTeX e converte in testo leggibile"""
+    if not isinstance(text, str):
+        return str(text)
+    
+    import re
+    
+    # Rimuovi delimitatori LaTeX
+    text = text.replace('$$', '').replace('$', '')
+    
+    # Rimuovi ambienti LaTeX complessi
+    text = re.sub(r'\\begin\{[^}]+\}', '', text)
+    text = re.sub(r'\\end\{[^}]+\}', '', text)
+    text = re.sub(r'\\aligned', '', text)
+    
+    # Sostituzioni simboli matematici
+    replacements = {
+        r'\overline{': '', r'\overline': '',
+        r'\cdot': '×', r'\times': '×', r'\div': '÷',
+        r'\pm': '±', r'\le': '≤', r'\ge': '≥', r'\ne': '≠', r'\approx': '≈',
+        r'\alpha': 'α', r'\beta': 'β', r'\gamma': 'γ', r'\delta': 'δ', r'\Delta': 'Δ',
+        r'\theta': 'θ', r'\pi': 'π', r'\epsilon': 'ε',
+        r'\sqrt': '√', r'\sum': 'Σ', r'\int': '∫',
+        r'\quad': ' ', r'\qquad': '  ',
+        '\\\\': ' ', '&': '', '{': '', '}': '',
+        '^2': '²', '^3': '³', '_': '', '~': ' '
+    }
+    
+    for latex, replacement in replacements.items():
+        text = text.replace(latex, replacement)
+    
+    # Pulisci comandi LaTeX generici rimasti
+    text = re.sub(r'\\[a-zA-Z]+\{', '', text)  # \comando{
+    text = re.sub(r'\\[a-zA-Z]+', '', text)    # \comando
+    
+    # Pulisci spazi multipli e newline
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    return text
+
+
+def generate_pdf_with_reportlab(log_entries, solved_values, student_surname, student_name, fig):
+    """
+    Genera PDF usando ReportLab - Standard industriale
+    Funziona su TUTTI i dispositivi (Mac, Windows, Linux, iOS, Android)
+    """
+    if not REPORTLAB_AVAILABLE:
+        print("❌ ReportLab non disponibile")
+        return None
+    
+    try:
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=20*mm, leftMargin=20*mm, topMargin=15*mm, bottomMargin=15*mm)
+        
+        # Stili
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle('CustomTitle', parent=styles['Heading1'], fontSize=18, textColor=colors.HexColor('#2c3e50'), spaceAfter=8, alignment=TA_CENTER)
+        heading_style = ParagraphStyle('CustomHeading', parent=styles['Heading2'], fontSize=13, textColor=colors.HexColor('#2980b9'), spaceAfter=6, spaceBefore=10)
+        normal_style = styles['Normal']
+        
+        story = []
+        
+        # Intestazione
+        story.append(Paragraph('<b>GeoSolver - Report Genio Rurale</b>', title_style))
+        story.append(Paragraph('Prof. G. Losenno - Prof. E. D\'Aranno', styles['Normal']))
+        story.append(Spacer(1, 10*mm))
+        
+        # Info studente
+        now = datetime.now()
+        info_data = [
+            ['Studente:', f'{student_surname} {student_name}'],
+            ['Data:', now.strftime('%d/%m/%Y %H:%M')]
+        ]
+        info_table = Table(info_data, colWidths=[40*mm, 120*mm])
+        info_table.setStyle(TableStyle([
+            ('FONT', (0, 0), (0, -1), 'Helvetica-Bold', 10),
+            ('FONT', (1, 0), (1, -1), 'Helvetica', 10),
+            ('TEXTCOLOR', (0, 0), (0, -1), colors.HexColor('#2980b9')),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('LINEBELOW', (0, -1), (-1, -1), 1, colors.HexColor('#2980b9'))
+        ]))
+        story.append(info_table)
+        story.append(Spacer(1, 8*mm))
+        
+        # Grafico (opzionale - se fallisce continua comunque)
+        tmp_path = None  # Track temp file
+        if fig:
+            try:
+                if not PLOTLY_IO_AVAILABLE:
+                    raise ImportError("plotly.io non disponibile")
+                
+                import tempfile, os
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+                    img_bytes = pio.to_image(fig, format='png', width=1200, height=800)
+                    tmp.write(img_bytes)
+                    tmp_path = tmp.name
+                
+                story.append(Paragraph('<b>Grafico del Poligono</b>', heading_style))
+                img = RLImage(tmp_path, width=160*mm, height=106*mm)
+                story.append(img)
+                story.append(Spacer(1, 6*mm))
+                # NON cancellare ancora - ReportLab lo leggerà dopo
+                print("✅ Grafico incluso nel PDF")
+            except Exception as e:
+                print(f"⚠️ Grafico non incluso: {e}")
+                story.append(Paragraph('<b>Grafico del Poligono</b>', heading_style))
+                story.append(Paragraph(f'<i>[Grafico non disponibile - Installa kaleido: pip install kaleido]</i>', normal_style))
+                story.append(Spacer(1, 3*mm))
+        
+        # Passaggi
+        story.append(Paragraph('<b>Passaggi di Risoluzione</b>', heading_style))
+        story.append(Spacer(1, 3*mm))
+        
+        if not log_entries:
+            story.append(Paragraph('<i>Nessun passaggio registrato</i>', normal_style))
+        
+        for i, entry in enumerate(log_entries, 1):
+            is_error = entry.get('is_error', False)
+            action = clean_latex_for_text(entry.get('action', 'N/A'))
+            method = clean_latex_for_text(entry.get('method', 'N/A'))
+            result = clean_latex_for_text(entry.get('result', 'N/A'))
+            
+            # NON limitare la lunghezza - usa word wrapping
+            
+            # Stile per i passaggi con background colorato
+            bg_color = colors.HexColor('#ffe6e6') if is_error else colors.HexColor('#e6ffe6')
+            # Usa simboli Unicode supportati invece di emoji
+            icon = '✗' if is_error else '✓'  # ✓ checkmark, ✗ ballot X
+            
+            step_style = ParagraphStyle(
+                'StepStyle',
+                parent=normal_style,
+                fontSize=9,
+                leading=11,
+                leftIndent=8,
+                rightIndent=8,
+                spaceBefore=3,
+                spaceAfter=3
+            )
+            
+            step_title_style = ParagraphStyle(
+                'StepTitleStyle',
+                parent=styles['Normal'],
+                fontSize=10,
+                fontName='Helvetica-Bold',
+                leftIndent=8,
+                spaceBefore=3
+            )
+            
+            # Usa Paragraph per permettere word wrapping automatico
+            step_content = [
+                [Paragraph(f'{icon} <b>Step {i}: {action}</b>', step_title_style)],
+                [Paragraph(f'<i>Metodo:</i> {method}', step_style)],
+                [Paragraph(f'<i>Risultato:</i> {result}', step_style)]
+            ]
+            
+            step_table = Table(step_content, colWidths=[165*mm])
+            step_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, -1), bg_color),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('TOPPADDING', (0, 0), (-1, -1), 5),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+                ('BOX', (0, 0), (-1, -1), 0.5, colors.grey)
+            ]))
+            
+            story.append(step_table)
+            story.append(Spacer(1, 3*mm))
+        
+        # Statistiche
+        total = len(log_entries)
+        errors = sum(1 for e in log_entries if e.get('is_error', False))
+        success_rate = ((total - errors) / total * 100) if total > 0 else 0
+        
+        story.append(Spacer(1, 4*mm))
+        story.append(Paragraph('<b>Statistiche</b>', heading_style))
+        
+        # Usa simboli Unicode compatibili con Helvetica invece di emoji
+        stats_data = [
+            ['Totale passaggi:', str(total)],
+            ['Corretti:', f'{total - errors} ●'],  # Pallino nero
+            ['Errori:', f'{errors} ●'],            # Pallino nero
+            ['Successo:', f'{success_rate:.1f}%']
+        ]
+        
+        stats_table = Table(stats_data, colWidths=[50*mm, 40*mm])
+        stats_table.setStyle(TableStyle([
+            ('FONT', (0, 0), (0, -1), 'Helvetica-Bold', 10),
+            ('FONT', (1, 0), (1, -1), 'Helvetica', 10),
+            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            # Colore verde per "Corretti"
+            ('TEXTCOLOR', (1, 1), (1, 1), colors.HexColor('#27ae60')),
+            # Colore rosso per "Errori"
+            ('TEXTCOLOR', (1, 2), (1, 2), colors.HexColor('#e74c3c')),
+            ('LINEABOVE', (0, 0), (-1, 0), 1, colors.HexColor('#2980b9')),
+            ('LINEBELOW', (0, -1), (-1, -1), 1, colors.HexColor('#2980b9'))
+        ]))
+        
+        story.append(stats_table)
+        
+        # Footer
+        story.append(Spacer(1, 8*mm))
+        footer_style = ParagraphStyle('Footer', parent=styles['Normal'], fontSize=8, textColor=colors.grey, alignment=TA_CENTER)
+        story.append(Paragraph('<i>Report generato da GeoSolver v70</i>', footer_style))
+        
+        # Genera PDF
+        doc.build(story)
+        pdf_bytes = buffer.getvalue()
+        buffer.close()
+        
+        # Pulisci file temporaneo se esiste
+        if tmp_path:
+            try:
+                import os
+                os.unlink(tmp_path)
+                print("🗑️ File temporaneo rimosso")
+            except:
+                pass
+        
+        return pdf_bytes
+        
+    except Exception as e:
+        print(f"Errore generazione PDF: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Pulisci file temporaneo anche in caso di errore
+        if 'tmp_path' in locals() and tmp_path:
+            try:
+                import os
+                os.unlink(tmp_path)
+            except:
+                pass
+        
+        return None
+
+
 def generate_html_report(log_entries, solved_values, student_surname, student_name, fig):
     student_fullname = f"{student_surname} {student_name}".strip()
     if not student_fullname:
@@ -726,287 +1037,6 @@ def generate_html_report(log_entries, solved_values, student_surname, student_na
     </html>
     """
     return html
-
-def clean_latex_for_pdf(text):
-    """
-    Pulisce il testo LaTeX per renderlo leggibile in PDF senza rendering matematico.
-    Converte formule LaTeX in testo ASCII leggibile.
-    """
-    if not isinstance(text, str):
-        return str(text)
-    
-    # Rimuovi delimitatori LaTeX
-    text = text.replace('$$', '').replace('$', '')
-    
-    # Converti simboli matematici comuni
-    replacements = {
-        r'\overline{': '',
-        r'}': '',
-        r'\cdot': '·',
-        r'\times': '×',
-        r'\div': '÷',
-        r'\pm': '±',
-        r'\le': '≤',
-        r'\ge': '≥',
-        r'\ne': '≠',
-        r'\approx': '≈',
-        r'\alpha': 'α',
-        r'\beta': 'β',
-        r'\gamma': 'γ',
-        r'\delta': 'δ',
-        r'\theta': 'θ',
-        r'\pi': 'π',
-        r'\sqrt': '√',
-        r'\frac': '',
-        r'\sum': 'Σ',
-        r'\int': '∫',
-        r'\Delta': 'Δ',
-        r'\\': ' ',
-        '{': '',
-        '}': '',
-        '^2': '²',
-        '^3': '³',
-        '_': '',
-    }
-    
-    for latex_cmd, unicode_char in replacements.items():
-        text = text.replace(latex_cmd, unicode_char)
-    
-    # Pulisci spazi multipli
-    text = re.sub(r'\s+', ' ', text).strip()
-    
-    return text
-
-
-def generate_pdf_report(log_entries, solved_values, student_surname, student_name, fig):
-    """
-    Genera un PDF professionale usando FPDF con font incorporati (100% compatibile).
-    Include grafico come immagine PNG statica.
-    Usa font core PDF incorporati automaticamente per compatibilità universale.
-    """
-    if not FPDF_AVAILABLE:
-        return b"PDF Error: fpdf2 not installed. Install with: pip install fpdf2"
-    
-    try:
-        # Crea PDF - usa format PDF/A per massima compatibilità
-        pdf = FPDF(format='A4')
-        pdf.add_page()
-        pdf.set_auto_page_break(auto=True, margin=15)
-        
-        # Usa font "core" che vengono automaticamente incorporati
-        # Times è un font standard PDF che funziona su tutti i dispositivi
-        
-        # === INTESTAZIONE ===
-        pdf.set_font('Times', 'B', 20)
-        pdf.cell(0, 12, 'Report GeoSolver', align='C', new_x="LMARGIN", new_y="NEXT")
-        
-        pdf.set_font('Times', '', 11)
-        pdf.cell(0, 7, 'Esercizio di Topografia', align='C', new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(3)
-        
-        pdf.set_font('Times', 'I', 10)
-        pdf.cell(0, 6, 'Prof. G. Losenno - Prof. E. D\'Aranno', align='C', new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(8)
-        
-        # === INFO STUDENTE ===
-        pdf.set_draw_color(41, 128, 185)
-        pdf.set_line_width(0.5)
-        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-        pdf.ln(5)
-        
-        pdf.set_font('Times', 'B', 13)
-        # Codifica corretta per caratteri speciali
-        try:
-            student_text = f'Studente: {student_surname} {student_name}'
-            pdf.cell(0, 8, student_text, new_x="LMARGIN", new_y="NEXT")
-        except:
-            # Fallback se ci sono problemi di encoding
-            pdf.cell(0, 8, f'Studente: {student_surname} {student_name}', new_x="LMARGIN", new_y="NEXT")
-        
-        now = datetime.now()
-        pdf.set_font('Times', '', 10)
-        pdf.cell(0, 6, f'Data: {now.strftime("%d/%m/%Y ore %H:%M")}', new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(5)
-        
-        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-        pdf.ln(8)
-        
-        # === GRAFICO (se disponibile) ===
-        if fig:
-            try:
-                # Converti grafico Plotly in PNG
-                import plotly.io as pio
-                import tempfile
-                import os
-                
-                # Salva come PNG temporaneo
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
-                    img_bytes = pio.to_image(fig, format='png', width=1400, height=900)
-                    tmp.write(img_bytes)
-                    tmp_path = tmp.name
-                
-                # Inserisci immagine nel PDF
-                pdf.set_font('Times', 'B', 12)
-                pdf.cell(0, 8, 'Grafico del Poligono:', new_x="LMARGIN", new_y="NEXT")
-                pdf.ln(2)
-                
-                # Calcola dimensioni per centrare l'immagine
-                page_width = 210 - 20  # A4 width - margini
-                img_width = page_width * 0.95
-                
-                pdf.image(tmp_path, x=15, w=img_width)
-                pdf.ln(5)
-                
-                # Rimuovi file temporaneo
-                os.unlink(tmp_path)
-                print("✅ Grafico incluso nel PDF come immagine PNG")
-                
-            except Exception as e:
-                print(f"⚠️ Impossibile includere grafico: {e}")
-                print("ℹ️ Installa kaleido per includere il grafico: pip install kaleido")
-                pdf.set_font('Times', 'I', 10)
-                pdf.set_fill_color(248, 249, 250)
-                pdf.multi_cell(0, 6, '📊 Grafico non disponibile (installa kaleido: pip install kaleido)', 
-                              fill=True, align='C')
-                pdf.ln(3)
-        
-        # === PASSAGGI DI RISOLUZIONE ===
-        pdf.set_font('Times', 'B', 14)
-        pdf.cell(0, 10, 'Passaggi di Risoluzione:', new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(3)
-        
-        error_count = 0
-        for i, entry in enumerate(log_entries, 1):
-            is_error = entry.get('is_error', False)
-            if is_error:
-                error_count += 1
-            
-            # Controlla se serve nuova pagina
-            if pdf.get_y() > 250:
-                pdf.add_page()
-            
-            # Header dello step
-            if is_error:
-                pdf.set_fill_color(254, 226, 226)  # Rosso chiaro
-                icon = '❌'
-            else:
-                pdf.set_fill_color(232, 245, 233)  # Verde chiaro
-                icon = '✅'
-            
-            pdf.set_font('Times', 'B', 11)
-            pdf.multi_cell(0, 7, f'{icon} Step {i}: {entry.get("action", "N/A")}', 
-                          fill=True, new_x="LMARGIN", new_y="NEXT")
-            
-            # Metodo
-            method = entry.get('method', 'N/A')
-            method_clean = clean_latex_for_pdf(method)
-            
-            pdf.set_font('Times', 'I', 9)
-            pdf.set_fill_color(255, 252, 231)  # Giallo pallido
-            pdf.multi_cell(0, 5, f'Metodo: {method_clean[:120]}', 
-                          fill=True, new_x="LMARGIN", new_y="NEXT")
-            
-            # Risultato
-            result = entry.get('result', 'N/A')
-            result_clean = clean_latex_for_pdf(result)
-            
-            pdf.set_font('Times', '', 9)
-            if len(result_clean) > 200:
-                result_clean = result_clean[:200] + '...'
-            
-            pdf.multi_cell(0, 5, f'Risultato: {result_clean}', 
-                          new_x="LMARGIN", new_y="NEXT")
-            
-            pdf.ln(3)
-        
-        # === STATISTICHE ===
-        total_steps = len(log_entries)
-        success_count = total_steps - error_count
-        success_rate = (success_count / total_steps * 100) if total_steps > 0 else 0
-        
-        if pdf.get_y() > 240:
-            pdf.add_page()
-        
-        pdf.set_draw_color(41, 128, 185)
-        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-        pdf.ln(5)
-        
-        pdf.set_font('Times', 'B', 12)
-        pdf.cell(0, 8, '📊 Statistiche Esercizio:', new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(2)
-        
-        pdf.set_font('Times', '', 10)
-        pdf.cell(0, 6, f'Totale passaggi: {total_steps}', new_x="LMARGIN", new_y="NEXT")
-        pdf.cell(0, 6, f'Passaggi corretti: {success_count} ✅', new_x="LMARGIN", new_y="NEXT")
-        pdf.cell(0, 6, f'Errori commessi: {error_count} ❌', new_x="LMARGIN", new_y="NEXT")
-        pdf.cell(0, 6, f'Tasso di successo: {success_rate:.1f}%', new_x="LMARGIN", new_y="NEXT")
-        
-        # === FOOTER ===
-        pdf.ln(8)
-        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-        pdf.ln(3)
-        
-        pdf.set_font('Times', 'I', 8)
-        pdf.set_text_color(128, 128, 128)
-        pdf.cell(0, 5, 'Report generato automaticamente da GeoSolver v68', 
-                align='C', new_x="LMARGIN", new_y="NEXT")
-        pdf.cell(0, 5, 'Istituto Tecnico - Topografia Didattica', 
-                align='C', new_x="LMARGIN", new_y="NEXT")
-        
-        # Output PDF
-        pdf_bytes = pdf.output()
-        
-        # Converti in bytes se necessario
-        if isinstance(pdf_bytes, bytearray):
-            pdf_bytes = bytes(pdf_bytes)
-        
-        print(f"✅ PDF generato: {len(pdf_bytes)} bytes (100% compatibile)")
-        return pdf_bytes
-        
-    except Exception as e:
-        import traceback
-        error_msg = f"Errore generazione PDF: {str(e)}\n{traceback.format_exc()}"
-        print(error_msg)
-        return error_msg.encode('utf-8')
-
-
-
-
-
-# --- STATE ---
-if 'raw_data' not in st.session_state: st.session_state.raw_data = [] 
-if 'points' not in st.session_state: st.session_state.points = {} 
-if 'log' not in st.session_state: st.session_state.log = []
-if 'projections_visible' not in st.session_state: st.session_state.projections_visible = False 
-if 'solved_items' not in st.session_state: st.session_state.solved_items = set() 
-if 'solved_values' not in st.session_state: st.session_state.solved_values = {} 
-if 'partial_angle_metadata' not in st.session_state: st.session_state.partial_angle_metadata = {}  # {key: {'suffix': '_1', 'pA': 'B', 'pB': 'D'}}
-if 'current_options' not in st.session_state: st.session_state.current_options = None
-if 'current_mission' not in st.session_state: st.session_state.current_mission = None
-if 'last_calc_msg' not in st.session_state: st.session_state.last_calc_msg = None
-if 'input_interpretation' not in st.session_state: st.session_state.input_interpretation = AngleUnit.GON 
-if 'ang_method_choice' not in st.session_state: st.session_state.ang_method_choice = None
-if 'selected_partial_suffix' not in st.session_state: st.session_state.selected_partial_suffix = None
-if 'az_segments_confirmed' not in st.session_state: st.session_state.az_segments_confirmed = False
-if 'angle_workflow_target' not in st.session_state: st.session_state.angle_workflow_target = None
-if 'dist_method_preference' not in st.session_state: st.session_state.dist_method_preference = None
-if 'specific_method_choice' not in st.session_state: st.session_state.specific_method_choice = None
-if 'student_name' not in st.session_state: st.session_state.student_name = ""
-if 'student_surname' not in st.session_state: st.session_state.student_surname = ""
-
-# [SEZIONE 1: NUOVO STATO AZIMUT AGGIORNATO CON PENDING TARGET]
-if 'az_workflow' not in st.session_state:
-    st.session_state.az_workflow = {
-        'active': False,
-        'vertex': None,
-        'step': 0,      # 0:Start, 1:Lato 1, 2:Lato 2, 3:Diff
-        'side1': None,
-        'side2': None,
-        'az1_val': None,
-        'az2_val': None,
-        'pending_target': None, # Il punto che stiamo calcolando ORA (fase quiz)
-        'quiz_options': None    # Le opzioni del quiz corrente
-    }
 
 def undo_last_action():
     if st.session_state.log:
@@ -2085,68 +2115,62 @@ with col_tutor:
     else:
         report_filename = "geosolver_report.pdf"
 
-    # Mostra sempre il pulsante di download del report, anche se il log è vuoto
+    # === GENERAZIONE PDF (Metodo Browser - Universalmente Compatibile) ===
     if st.session_state.log or st.session_state.points:
+        st.markdown("---")
         
-        # Aggiungi stato per tracciare se il PDF è stato generato
-        if 'pdf_ready' not in st.session_state:
-            st.session_state.pdf_ready = False
-        if 'pdf_data' not in st.session_state:
-            st.session_state.pdf_data = None
+        # Genera nome file: Cognome_Nome_gg_mm_aaaa_hh_mm.pdf
+        now = datetime.now()
+        cognome = st.session_state.student_surname if st.session_state.student_surname else "Studente"
+        nome = st.session_state.student_name if st.session_state.student_name else "Anonimo"
+        pdf_filename = f"{cognome}_{nome}_{now.strftime('%d_%m_%Y_%H_%M')}.pdf"
         
-        # Messaggio informativo
-        st.info("📄 **PDF Professionale**: Include grafico, formule e passaggi. Compatibile con **tutti i dispositivi** (Mac, Windows, iPad, iPhone, Android).")
-        
-        # Bottone per generare il PDF
-        if st.button("🔄 Genera Report PDF", type="primary", use_container_width=True):
-            with st.spinner("⏳ Generazione PDF in corso... Attendi qualche secondo..."):
-                # Usa FPDF per PDF professionale universalmente compatibile
-                st.session_state.pdf_data = generate_pdf_report(
-                    st.session_state.log, 
-                    st.session_state.solved_values, 
-                    cognome_original, 
-                    nome_original,
+        # Bottone per generare e scaricare PDF
+        if st.button("📥 Scarica Report PDF", type="primary", use_container_width=True):
+            # Verifica prerequisiti
+            if not REPORTLAB_AVAILABLE:
+                st.error("❌ ReportLab non installato!")
+                st.code("pip3 install reportlab pillow", language="bash")
+                st.stop()
+            
+            with st.spinner("⏳ Generazione PDF in corso..."):
+                pdf_bytes = generate_pdf_with_reportlab(
+                    st.session_state.log,
+                    st.session_state.solved_values,
+                    cognome,
+                    nome,
                     st.session_state.get('current_fig', None)
                 )
-                st.session_state.pdf_ready = True
-                st.rerun()
-        
-        # Se il PDF è pronto, mostra il bottone di download
-        if st.session_state.pdf_ready and st.session_state.pdf_data:
-            # Verifica che il PDF sia valido
-            pdf_size = len(st.session_state.pdf_data) if st.session_state.pdf_data else 0
-            
-            if pdf_size > 100:  # PDF valido (almeno 100 bytes)
-                st.success(f"✅ PDF generato con successo! ({pdf_size // 1024} KB)")
-                st.download_button(
-                    "📄 Scarica Report PDF", 
-                    data=st.session_state.pdf_data,
-                    file_name=report_filename, 
-                    mime="application/pdf",
-                    use_container_width=True,
-                    help="Clicca per scaricare il report PDF"
-                )
-            else:
-                # PDF troppo piccolo o corrotto
-                st.error("❌ Errore: PDF generato non valido")
-                st.warning("Possibili cause:")
-                st.info("1. Chromium non installato: `py -m playwright install chromium`")
-                st.info("2. Problema di rendering MathJax")
                 
-                # Mostra il contenuto per debug (se è testo)
-                if pdf_size < 1000:
-                    try:
-                        error_text = st.session_state.pdf_data.decode('utf-8')
-                        with st.expander("🔍 Dettagli errore"):
-                            st.code(error_text)
-                    except:
-                        pass
-            
-            # Aggiungi un bottone per rigenerare
-            if st.button("🔄 Rigenera PDF (se hai fatto modifiche)", use_container_width=True):
-                st.session_state.pdf_ready = False
-                st.session_state.pdf_data = None
-                st.rerun()
+                if pdf_bytes:
+                    st.success(f"✅ PDF generato! ({len(pdf_bytes) // 1024} KB)")
+                    st.download_button(
+                        label="💾 Salva PDF",
+                        data=pdf_bytes,
+                        file_name=pdf_filename,
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
+                else:
+                    st.error("❌ Errore nella generazione del PDF")
+                    st.warning("**Controlla il terminale per dettagli dell'errore**")
+                    with st.expander("🔧 Soluzioni"):
+                        st.markdown("""
+                        **Installa le librerie necessarie:**
+                        ```bash
+                        pip3 install reportlab pillow kaleido
+                        ```
+                        
+                        **Se kaleido non funziona:**
+                        - Il PDF verrà generato comunque senza grafico
+                        - Su Mac 12: kaleido potrebbe non funzionare, usa Mac 13+
+                        
+                        **Verifica installazione:**
+                        ```python
+                        import reportlab
+                        print("ReportLab OK")
+                        ```
+                        """)
         
         if st.session_state.log:
             steps_count = len(st.session_state.log)
