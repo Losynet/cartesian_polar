@@ -768,17 +768,14 @@ def generate_pdf_with_reportlab(log_entries, solved_values, student_surname, stu
         if fig:
             graph_included = False
             
-            # METODO 1: Prova con PIL/Pillow (non richiede kaleido)
+            # METODO 1: Prova con write_image (Richiede 'kaleido' installato)
             try:
-                from PIL import Image as PILImage
-                import io
-                
-                # Esporta come HTML statico e converti con selenium-like approach
-                # Oppure usa il metodo più semplice: salva come bytes in memoria
+                # Questo metodo richiede che la libreria 'kaleido' sia installata (versione 0.2.1 consigliata)
                 img_bytes_io = BytesIO()
                 
                 # Salva figura come immagine usando il metodo write_image se disponibile
                 try:
+                    # Nota: Se kaleido non è installato, questo comando fallirà
                     fig.write_image(img_bytes_io, format='png', width=1200, height=800)
                     img_bytes_io.seek(0)
                     
@@ -794,7 +791,7 @@ def generate_pdf_with_reportlab(log_entries, solved_values, student_surname, stu
                     graph_included = True
                     print("✅ Grafico incluso (metodo write_image)")
                 except:
-                    raise  # Vai al metodo successivo
+                    raise Exception("write_image fallito (probabilmente kaleido mancante)")
                     
             except Exception as e1:
                 # METODO 2: Prova con kaleido (fallback)
@@ -833,7 +830,7 @@ def generate_pdf_with_reportlab(log_entries, solved_values, student_surname, stu
                     except Exception as e3:
                         # Tutti i metodi falliti
                         print(f"⚠️ Impossibile includere grafico:")
-                        print(f"  - Metodo 1 (write_image): {e1}")
+                        print(f"  - Metodo 1 (write_image/kaleido): {e1}")
                         print(f"  - Metodo 2 (kaleido): {e2}")
                         print(f"  - Metodo 3 (orca): {e3}")
                         
@@ -852,23 +849,6 @@ def generate_pdf_with_reportlab(log_entries, solved_values, student_surname, stu
         for i, entry in enumerate(log_entries, 1):
             is_error = entry.get('is_error', False)
             action = clean_latex_for_text(entry.get('action', 'N/A'))
-            
-            # Tenta di generare immagine LaTeX per il Metodo (Formula)
-            method_raw = entry.get('method', 'N/A')
-            method_img = latex_to_rl_image(method_raw, fontsize=11)
-            if method_img:
-                method_content = [Paragraph('<i>Metodo:</i>', step_style), method_img]
-            else:
-                method_content = [Paragraph(f'<i>Metodo:</i> {clean_latex_for_text(method_raw)}', step_style)]
-            
-            # Per il Risultato, usa testo pulito (spesso è multiline aligned, difficile per mathtext)
-            # Se è semplice, si potrebbe provare a renderizzarlo, ma aligned fallisce in matplotlib standard
-            result_raw = entry.get('result', 'N/A')
-            # Fallback a testo per il risultato per garantire leggibilità dei passaggi numerici
-            result_clean = clean_latex_for_text(result_raw)
-            result_content = [Paragraph(f'<i>Risultato:</i> {result_clean}', step_style)]
-            
-            # NON limitare la lunghezza - usa word wrapping
             
             # Stile per i passaggi con background colorato
             bg_color = colors.HexColor('#ffe6e6') if is_error else colors.HexColor('#e6ffe6')
@@ -894,6 +874,23 @@ def generate_pdf_with_reportlab(log_entries, solved_values, student_surname, stu
                 leftIndent=8,
                 spaceBefore=3
             )
+            
+            # Tenta di generare immagine LaTeX per il Metodo (Formula)
+            method_raw = entry.get('method', 'N/A')
+            method_img = latex_to_rl_image(method_raw, fontsize=11)
+            if method_img:
+                method_content = [Paragraph('<i>Metodo:</i>', step_style), method_img]
+            else:
+                method_content = [Paragraph(f'<i>Metodo:</i> {clean_latex_for_text(method_raw)}', step_style)]
+            
+            # Per il Risultato, usa testo pulito (spesso è multiline aligned, difficile per mathtext)
+            # Se è semplice, si potrebbe provare a renderizzarlo, ma aligned fallisce in matplotlib standard
+            result_raw = entry.get('result', 'N/A')
+            # Fallback a testo per il risultato per garantire leggibilità dei passaggi numerici
+            result_clean = clean_latex_for_text(result_raw)
+            result_content = [Paragraph(f'<i>Risultato:</i> {result_clean}', step_style)]
+            
+            # NON limitare la lunghezza - usa word wrapping
             
             # Usa Paragraph per permettere word wrapping automatico
             step_content = [
