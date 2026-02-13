@@ -8,7 +8,10 @@ pandas>=2.0.0
 
 # PDF Professionale (Funziona su TUTTI i dispositivi)
 reportlab>=4.0.0
+pillow>=10.0.0
 
 # Per salvare grafico Plotly come PNG nel PDF
+# OPZIONALE: Se kaleido non funziona, il PDF verrà generato senza grafico
+# Il grafico sarà comunque visibile nell'applicazione web
 kaleido>=1.0.0
-pillow>=10.0.0
+matplotlib>=3.5.0
