@@ -1,19 +1,14 @@
-# Framework Web
+# GeoSolver v70 - Requirements Finali
+# PDF generato con ReportLab (Standard Industriale)
+
 streamlit>=1.28.0
-
-# Grafici Interattivi
 plotly>=5.17.0
-
-# Conversione Grafici Plotly in Immagini PNG
-# Necessario per includere il grafico nel PDF
-kaleido>=0.2.1
-
-# Calcoli Numerici
 numpy>=1.24.0
-
-# Gestione Dati
 pandas>=2.0.0
 
-# Generazione PDF Professionale (100% compatibile)
-# Funziona su tutti i dispositivi senza browser headless
-fpdf2>=2.7.0
+# PDF Professionale (Funziona su TUTTI i dispositivi)
+reportlab>=4.0.0
+
+# Per salvare grafico Plotly come PNG nel PDF
+kaleido>=1.0.0
+pillow>=10.0.0
