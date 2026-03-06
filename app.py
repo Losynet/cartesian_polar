@@ -28,15 +28,6 @@ try:
 except ImportError:
     PLOTLY_IO_AVAILABLE = False
 
-# Import matplotlib per rendering LaTeX nel PDF
-try:
-    import matplotlib
-    matplotlib.use('Agg') # Backend non interattivo per server
-    import matplotlib.pyplot as plt
-    MATPLOTLIB_AVAILABLE = True
-except ImportError:
-    MATPLOTLIB_AVAILABLE = False
-
 # --- CONFIGURAZIONE ---
 st.set_page_config(layout="wide", page_title="GeoSolver v69 - Prof. Losenno")
 
@@ -89,6 +80,7 @@ if 'specific_method_choice' not in st.session_state: st.session_state.specific_m
 if 'student_name' not in st.session_state: st.session_state.student_name = ""
 if 'student_surname' not in st.session_state: st.session_state.student_surname = ""
 if 'student_class' not in st.session_state: st.session_state.student_class = ""
+if 'dist_method_preference' not in st.session_state: st.session_state.dist_method_preference = None
 
 if 'az_workflow' not in st.session_state:
     st.session_state.az_workflow = {
@@ -185,6 +177,26 @@ def get_strategies_for_mission(mission_code, method_filter=None):
         ]
         q['latex'] = rf"({p1}{p2}) = \arctan\left(\frac{{X_{{{p2}}}-X_{{{p1}}}}}{{Y_{{{p2}}}-Y_{{{p1}}}}}\right)"
         q['desc'] = rf"Calcolo Azimut {p1}-{p2}"
+    elif act == "calc_qs":
+        pt = parts[2]
+        q['correct'] = rf"$Q_S = Q_{{{pt}}} - HS - \Delta_{{{pt}}} + HM$"
+        q['wrongs'] = [
+            rf"$Q_S = Q_{{{pt}}} + HS + \Delta_{{{pt}}} - HM$",
+            rf"$Q_S = Q_{{{pt}}} + HS - \Delta_{{{pt}}} + HM$",
+            rf"$Q_S = Q_{{{pt}}} - HS + \Delta_{{{pt}}} - HM$",
+        ]
+        q['latex'] = rf"Q_S = Q_{{{pt}}} - HS - \Delta_{{{pt}}} + HM"
+        q['desc'] = rf"Calcolo Q_S da Q_{{{pt}}}"
+    elif act == "calc_qp":
+        pt = parts[2]
+        q['correct'] = rf"$Q_{{{pt}}} = Q_S + HS + \Delta_{{{pt}}} - HM$"
+        q['wrongs'] = [
+            rf"$Q_{{{pt}}} = Q_S - HS - \Delta_{{{pt}}} + HM$",
+            rf"$Q_{{{pt}}} = Q_S + HS - \Delta_{{{pt}}} - HM$",
+            rf"$Q_{{{pt}}} = Q_S - HS + \Delta_{{{pt}}} - HM$",
+        ]
+        q['latex'] = rf"Q_{{{pt}}} = Q_S + HS + \Delta_{{{pt}}} - HM"
+        q['desc'] = rf"Calcolo Q_{{{pt}}}"
     elif act == "calc_poly":
         if parts[2] == "area": q={'correct':r"$S = \frac{1}{2} \cdot L_1 \cdot L_2 \cdot \sin(\alpha)$", 'wrongs':[r"Base x Altezza"], 'latex':r"S...", 'desc':"Calcolo Area"}
         elif parts[2] == "perim": q={'correct':r"$\sum L_i$", 'wrongs':[r"Prod"], 'latex':r"2p...", 'desc':"Calcolo Perimetro"}
@@ -680,45 +692,6 @@ def clean_latex_for_text(text):
     
     return text
 
-def latex_to_rl_image(latex_str, fontsize=12):
-    """Converte stringa LaTeX in immagine ReportLab usando Matplotlib"""
-    if not MATPLOTLIB_AVAILABLE or not latex_str:
-        return None
-    
-    try:
-        # Pulisci la stringa
-        s = latex_str.strip()
-        # Rimuovi delimitatori se presenti (matplotlib li vuole o no a seconda del contesto, ma meglio gestire)
-        if s.startswith('$$') and s.endswith('$$'): s = s[2:-2]
-        elif s.startswith('$') and s.endswith('$'): s = s[1:-1]
-        
-        # Matplotlib mathtext richiede $...$ per il math mode
-        render_str = f"${s}$"
-        
-        # Configura plot
-        buf = BytesIO()
-        fig = plt.figure(figsize=(0.1, 0.1)) # Dimensione dummy
-        # Renderizza testo
-        fig.text(0, 0, render_str, fontsize=fontsize)
-        
-        # Salva con bounding box stretto
-        fig.savefig(buf, format='png', dpi=300, bbox_inches='tight', transparent=True, pad_inches=0.02)
-        plt.close(fig)
-        buf.seek(0)
-        
-        # Calcola dimensioni per ReportLab
-        from PIL import Image as PILImage
-        with PILImage.open(buf) as pil_img:
-            w_px, h_px = pil_img.size
-        
-        # Conversione px -> punti (300dpi -> 72dpi)
-        scale_factor = 72 / 300 * 0.8 # 0.8 correzione visiva
-        buf.seek(0)
-        return RLImage(buf, width=w_px*scale_factor, height=h_px*scale_factor)
-        
-    except Exception as e:
-        # In caso di errore (es. sintassi non supportata da mathtext), ritorna None per fallback testuale
-        return None
 
 def generate_pdf_with_reportlab(log_entries, solved_values, student_surname, student_name, fig):
     """
@@ -768,14 +741,17 @@ def generate_pdf_with_reportlab(log_entries, solved_values, student_surname, stu
         if fig:
             graph_included = False
             
-            # METODO 1: Prova con write_image (Richiede 'kaleido' installato)
+            # METODO 1: Prova con PIL/Pillow (non richiede kaleido)
             try:
-                # Questo metodo richiede che la libreria 'kaleido' sia installata (versione 0.2.1 consigliata)
+                from PIL import Image as PILImage
+                import io
+                
+                # Esporta come HTML statico e converti con selenium-like approach
+                # Oppure usa il metodo più semplice: salva come bytes in memoria
                 img_bytes_io = BytesIO()
                 
                 # Salva figura come immagine usando il metodo write_image se disponibile
                 try:
-                    # Nota: Se kaleido non è installato, questo comando fallirà
                     fig.write_image(img_bytes_io, format='png', width=1200, height=800)
                     img_bytes_io.seek(0)
                     
@@ -791,7 +767,7 @@ def generate_pdf_with_reportlab(log_entries, solved_values, student_surname, stu
                     graph_included = True
                     print("✅ Grafico incluso (metodo write_image)")
                 except:
-                    raise Exception("write_image fallito (probabilmente kaleido mancante)")
+                    raise  # Vai al metodo successivo
                     
             except Exception as e1:
                 # METODO 2: Prova con kaleido (fallback)
@@ -830,7 +806,7 @@ def generate_pdf_with_reportlab(log_entries, solved_values, student_surname, stu
                     except Exception as e3:
                         # Tutti i metodi falliti
                         print(f"⚠️ Impossibile includere grafico:")
-                        print(f"  - Metodo 1 (write_image/kaleido): {e1}")
+                        print(f"  - Metodo 1 (write_image): {e1}")
                         print(f"  - Metodo 2 (kaleido): {e2}")
                         print(f"  - Metodo 3 (orca): {e3}")
                         
@@ -849,6 +825,10 @@ def generate_pdf_with_reportlab(log_entries, solved_values, student_surname, stu
         for i, entry in enumerate(log_entries, 1):
             is_error = entry.get('is_error', False)
             action = clean_latex_for_text(entry.get('action', 'N/A'))
+            method = clean_latex_for_text(entry.get('method', 'N/A'))
+            result = clean_latex_for_text(entry.get('result', 'N/A'))
+            
+            # NON limitare la lunghezza - usa word wrapping
             
             # Stile per i passaggi con background colorato
             bg_color = colors.HexColor('#ffe6e6') if is_error else colors.HexColor('#e6ffe6')
@@ -875,28 +855,11 @@ def generate_pdf_with_reportlab(log_entries, solved_values, student_surname, stu
                 spaceBefore=3
             )
             
-            # Tenta di generare immagine LaTeX per il Metodo (Formula)
-            method_raw = entry.get('method', 'N/A')
-            method_img = latex_to_rl_image(method_raw, fontsize=11)
-            if method_img:
-                method_content = [Paragraph('<i>Metodo:</i>', step_style), method_img]
-            else:
-                method_content = [Paragraph(f'<i>Metodo:</i> {clean_latex_for_text(method_raw)}', step_style)]
-            
-            # Per il Risultato, usa testo pulito (spesso è multiline aligned, difficile per mathtext)
-            # Se è semplice, si potrebbe provare a renderizzarlo, ma aligned fallisce in matplotlib standard
-            result_raw = entry.get('result', 'N/A')
-            # Fallback a testo per il risultato per garantire leggibilità dei passaggi numerici
-            result_clean = clean_latex_for_text(result_raw)
-            result_content = [Paragraph(f'<i>Risultato:</i> {result_clean}', step_style)]
-            
-            # NON limitare la lunghezza - usa word wrapping
-            
             # Usa Paragraph per permettere word wrapping automatico
             step_content = [
                 [Paragraph(f'{icon} <b>Step {i}: {action}</b>', step_title_style)],
-                method_content,
-                result_content
+                [Paragraph(f'<i>Metodo:</i> {method}', step_style)],
+                [Paragraph(f'<i>Risultato:</i> {result}', step_style)]
             ]
             
             step_table = Table(step_content, colWidths=[165*mm])
@@ -1173,6 +1136,7 @@ def recalculate_points():
     st.session_state.dist_method_preference = None
     st.session_state.specific_method_choice = None
     unit_in = st.session_state.input_interpretation
+    # Prima passata: carica tutti i punti base
     for item in st.session_state.raw_data:
         lbl = item['lbl']
         p_unit = item.get('unit', unit_in) # Usa unità specifica se presente
@@ -1183,12 +1147,68 @@ def recalculate_points():
             st.session_state.solved_items.add(f"Dist_{lbl}"); st.session_state.solved_items.add(f"Az_{lbl}")
             st.session_state.solved_values[f"Dist_{lbl}"] = format_coord(v1)
             st.session_state.solved_values[f"Az_{lbl}"] = format_angle_output(rads, p_unit)
+            # --- DATI ALTIMETRICI ---
+            # Formula topografica corretta (lettura al cerchio verticale zenitale):
+            #   alpha = 100g - z  (angolo verticale: positivo sopra orizzonte, negativo sotto)
+            #   Delta = DO * tan(alpha)
+            #   QS = QP - HS - Delta + HM   (inverso: dal punto noto ricavo la stazione)
+            #   QP = QS + HS + Delta - HM   (diretto: dalla stazione ricavo i punti)
+            if item.get('av') is not None:
+                hs = item.get('hs', 0.0) or 0.0
+                hm = item.get('hm', 0.0) or 0.0
+                do = v1  # Distanza Orizzontale
+                z_raw = item['av']  # lettura cerchio verticale zenitale
+
+                # Converti z in angolo verticale alpha
+                # Normalizza p_unit per confronto robusto
+                _pu = str(p_unit).upper()
+                if 'GON' in _pu or 'CENT' in _pu:
+                    alpha_rad = (100.0 - z_raw) * math.pi / 200.0
+                elif 'DEG' in _pu or 'SESS' in _pu:
+                    alpha_rad = math.radians(90.0 - z_raw)
+                else:  # RAD
+                    alpha_rad = (math.pi / 2.0) - z_raw
+
+                # Delta = DO * tan(alpha) — positivo se punto battuto sopra la stazione
+                delta = do * math.tan(alpha_rad)
+
+                st.session_state.points[lbl]['alpha_rad'] = alpha_rad
+                st.session_state.points[lbl]['z_raw'] = z_raw      # angolo zenitale originale
+                st.session_state.points[lbl]['p_unit'] = p_unit    # unità angolo
+                st.session_state.points[lbl]['hs'] = hs
+                st.session_state.points[lbl]['hm'] = hm
+                st.session_state.points[lbl]['delta'] = delta
+                st.session_state.solved_values[f"AV_{lbl}"] = f"{z_raw} {p_unit}"
+                st.session_state.solved_values[f"Delta_{lbl}"] = f"{delta:.4f} m"
+                st.session_state.solved_values[f"HS_{lbl}"] = f"{hs:.4f} m"
+                st.session_state.solved_values[f"HM_{lbl}"] = f"{hm:.4f} m"
+                st.session_state.solved_items.add(f"AV_{lbl}")
+                st.session_state.solved_items.add(f"Delta_{lbl}")
         elif item['type'] == 'cart':
             v1, v2 = item['v1'], item['v2']
             st.session_state.points[lbl] = {'x': v1, 'y': v2, 'r': math.sqrt(v1**2+v2**2), 'alpha': math.atan2(v1, v2), 'type': 'cart'}
             st.session_state.solved_items.add(f"X_{lbl}"); st.session_state.solved_items.add(f"Y_{lbl}")
             st.session_state.solved_values[f"X_{lbl}"] = format_coord(v1)
             st.session_state.solved_values[f"Y_{lbl}"] = format_coord(v2)
+
+    # Seconda passata: registra SOLO le quote note inserite dall'utente come dati di partenza.
+    # QS e le quote degli altri punti NON vengono pre-calcolate:
+    # sarà lo studente a calcolarle tramite il Tutor (quiz didattico).
+    for item in st.session_state.raw_data:
+        if item.get('quota_src') is not None and item.get('quota_val') is not None:
+            src = item['quota_src']
+            val = item['quota_val']
+            if src == 'S':
+                # Quota stazione nota → registra QS come dato
+                st.session_state.solved_values["Q_S"] = f"{val:.4f} m"
+                st.session_state.solved_items.add("Q_S")
+            else:
+                # Quota di un punto noto (es. QA=25) → registra solo quel punto
+                st.session_state.points[src]['quota'] = val
+                st.session_state.solved_values[f"Q_{src}"] = f"{val:.4f} m"
+                st.session_state.solved_items.add(f"Q_{src}")
+                # Salva anche nel raw per ritrovarlo nel motore di calcolo
+                st.session_state.points[src]['quota_nota'] = val
 
 def activate_projections():
     st.session_state.projections_visible = True
@@ -1254,7 +1274,15 @@ with st.sidebar:
         for item in st.session_state.raw_data:
             lbl = item['lbl']
             if item['type'] == 'pol':
-                st.info(f"**Punto {lbl}** (Polare)\n\nDist: `{item['v1']}`\nAzimut: `{item['v2']}`")
+                info_txt = f"**Punto {lbl}** (Polare)\n\nDO: `{item['v1']}` m\nAzimut: `{item['v2']}`"
+                if item.get('av') is not None:
+                    info_txt += f"\nAV (Zenit): `{item['av']}`"
+                if item.get('hs') is not None:
+                    info_txt += f"\nHS: `{item['hs']}` m  |  HM: `{item['hm']}` m"
+                if item.get('quota_src') is not None:
+                    src_label = "QS (Stazione)" if item['quota_src'] == 'S' else f"Q{item['quota_src']}"
+                    info_txt += f"\n{src_label}: `{item['quota_val']}` m"
+                st.info(info_txt)
             elif item['type'] == 'cart':
                 st.info(f"**Punto {lbl}** (Cartesiano)\n\nX: `{item['v1']}`\nY: `{item['v2']}`")
         
@@ -1274,14 +1302,59 @@ with st.sidebar:
         with col1: pt_lbl = st.selectbox("Etichetta", alfabeto, index=0)
         with col2: c_type = st.selectbox("Tipo", ["Polare", "Cartesiano"])
         
-        v1 = st.number_input("Distanza (m)" if "Polare" in c_type else "Coord. X (m)", format="%.4f")
-        v2 = st.number_input("Azimut" if "Polare" in c_type else "Coord. Y (m)", format="%.4f")
+        v1 = st.number_input("Distanza Orizzontale DO (m)" if "Polare" in c_type else "Coord. X (m)", format="%.4f")
+        v2 = st.number_input("Angolo Orizzontale (Azimut)" if "Polare" in c_type else "Coord. Y (m)", format="%.4f")
         
-        man_unit = st.selectbox("Unità", [AngleUnit.GON, AngleUnit.DEG, AngleUnit.RAD]) if "Polare" in c_type else None
+        man_unit = st.selectbox("Unità angoli", [AngleUnit.GON, AngleUnit.DEG, AngleUnit.RAD]) if "Polare" in c_type else None
+
+        # --- DATI ALTIMETRICI (OPZIONALI) ---
+        if "Polare" in c_type:
+            st.markdown("**📐 Dati Altimetrici** *(opzionali)*")
+            use_altimetry = st.checkbox("Inserisci dati altimetrici", key="use_altimetry_check")
+            if use_altimetry:
+                av_val = st.number_input("Angolo Verticale / Zenit (AV)", format="%.4f", key="input_av",
+                                         help="Angolo zenitale o verticale misurato dallo strumento verso la mira")
+                col_hs, col_hm = st.columns(2)
+                with col_hs:
+                    hs_val = st.number_input("Altezza Strumento HS (m)", format="%.4f", key="input_hs",
+                                             help="Altezza dello strumento sul punto di stazione")
+                with col_hm:
+                    hm_val = st.number_input("Altezza Mira HM (m)", format="%.4f", key="input_hm",
+                                             help="Altezza della mira sul punto battuto")
+                
+                st.markdown("**📍 Quota Nota** *(per calcolo dislivelli)*")
+                quota_source = st.selectbox("Quota nota di:", 
+                    ["— nessuna —", "Stazione (QS)"] + [f"Punto {l}" for l in alfabeto],
+                    key="quota_source_sel")
+                if quota_source != "— nessuna —":
+                    quota_val = st.number_input("Valore quota (m)", format="%.4f", key="input_quota_val")
+                else:
+                    quota_val = None
+            else:
+                av_val = None; hs_val = None; hm_val = None
+                quota_source = "— nessuna —"; quota_val = None
+        else:
+            use_altimetry = False
+            av_val = None; hs_val = None; hm_val = None
+            quota_source = "— nessuna —"; quota_val = None
 
         if st.button("Aggiungi Punto"):
             dtype = 'pol' if "Polare" in c_type else 'cart'
-            st.session_state.raw_data.append({'lbl':pt_lbl, 'type':dtype, 'v1':v1, 'v2':v2, 'unit': man_unit})
+            entry = {'lbl': pt_lbl, 'type': dtype, 'v1': v1, 'v2': v2, 'unit': man_unit}
+            # Aggiungi dati altimetrici se inseriti
+            if use_altimetry and av_val is not None:
+                entry['av'] = av_val          # Angolo Verticale / Zenit
+                entry['hs'] = hs_val          # Altezza Strumento
+                entry['hm'] = hm_val          # Altezza Mira
+                if quota_source != "— nessuna —" and quota_val is not None:
+                    if quota_source == "Stazione (QS)":
+                        entry['quota_src'] = 'S'
+                        entry['quota_val'] = quota_val
+                    else:
+                        # Estrae lettera dal formato "Punto X"
+                        entry['quota_src'] = quota_source.replace("Punto ", "")
+                        entry['quota_val'] = quota_val
+            st.session_state.raw_data.append(entry)
             recalculate_points()
             st.rerun()
     
@@ -1508,6 +1581,68 @@ def draw_azimuth_visuals(fig, p1_lbl, p2_lbl, base_radius, radius_offset_step):
     if len(arc_x) > 0:
         mid_idx = len(arc_x)//2
         fig.add_annotation(x=arc_x[mid_idx], y=arc_y[mid_idx], text=f"({p1_lbl}{p2_lbl})", font=dict(color="#d35400", size=10), showarrow=False, xshift=5, yshift=5, bgcolor="rgba(255,255,255,0.6)")
+
+# --- RIEPILOGO ALTIMETRICO ---
+# Mostra solo se ci sono dati altimetrici caricati
+_alti_keys = [k for k in st.session_state.solved_values if k.startswith("Delta_") or k.startswith("Q_") or k.startswith("AV_")]
+if _alti_keys:
+    with st.expander("📏 Riepilogo Altimetrico", expanded=True):
+        _alti_cols = st.columns(4)
+        _col_i = 0
+        # QS per prima se presente
+        if "Q_S" in st.session_state.solved_values:
+            _alti_cols[_col_i % 4].metric("Q Stazione (QS)", st.session_state.solved_values["Q_S"])
+            _col_i += 1
+        # Per ogni punto con dati altimetrici
+        for _lbl, _pt in sorted(st.session_state.points.items()):
+            if "alpha_rad" in _pt:
+                _av_val  = _pt.get('z_raw', 0.0)
+                _p_unit  = _pt.get('p_unit', 'Gon')
+                _hs_val  = _pt.get('hs', 0.0)
+                _hm_val  = _pt.get('hm', 0.0)
+                _do_val  = _pt.get('r', 0.0)
+                _delta_val = _pt.get('delta', 0.0)
+                _q_str   = st.session_state.solved_values.get(f"Q_{_lbl}", "—")
+
+                _c = _alti_cols[_col_i % 4]
+                # Calcola alpha nella stessa unità di z per mostrarlo correttamente
+                _pu_up = str(_p_unit).upper()
+                if 'GON' in _pu_up or 'CENT' in _pu_up:
+                    _alpha_val = 100.0 - _av_val
+                    _unit_sym = 'ᵍ'
+                elif 'DEG' in _pu_up or 'SESS' in _pu_up:
+                    _alpha_val = 90.0 - _av_val
+                    _unit_sym = '°'
+                else:
+                    import math as _math
+                    _alpha_val = _math.pi/2 - _av_val
+                    _unit_sym = ' rad'
+                # Riga 1: intestazione punto
+                _c.markdown(
+                    f"**Punto {_lbl}** &nbsp; z={_av_val}{_unit_sym} | "
+                    f"H<sub>s</sub>={_hs_val}m | H<sub>m</sub>={_hm_val}m",
+                    unsafe_allow_html=True
+                )
+                # Riga 2: formula Δ compatta
+                _c.markdown(
+                    f"<small>Δ<sub>{_lbl}</sub> = {_do_val:.3f}·tan(100−{_av_val}{_unit_sym}) "
+                    f"= <b>{_delta_val:+.4f} m</b></small>",
+                    unsafe_allow_html=True
+                )
+                # Riga 3: formula quota (solo se calcolata)
+                if _q_str != "—":
+                    _q_num = float(_q_str.replace(" m",""))
+                    _qs_str = st.session_state.solved_values.get("Q_S","—")
+                    if "Q_S" in st.session_state.solved_items:
+                        _qs_num = float(_qs_str.replace(" m",""))
+                        _c.markdown(
+                            f"<small>Q<sub>{_lbl}</sub> = {_qs_num:.4f} + H<sub>s</sub>{_hs_val:+.4f} + ({_delta_val:+.4f}) − H<sub>m</sub>{_hm_val:.4f} "
+                            f"= <b>{_q_num:.4f} m</b></small>",
+                            unsafe_allow_html=True
+                        )
+                    else:
+                        _c.info(f"Q{_lbl} = {_q_str}")
+                _col_i += 1
 
 # --- GRAPH ---
 col_graph, col_tutor = st.columns([3, 1])
@@ -2195,6 +2330,15 @@ def check_goal_feasibility(subject, action):
         parts = subject.replace("Azimut ", "").split(" → ")
         p1, p2 = parts[0], parts[1]
         return True, "OK", f"seg_az_{p1}_{p2}"
+    if subject.startswith("Quota Stazione"):
+        # Estrae il punto noto: "Quota Stazione QS (da QA)" → pt = "A"
+        import re
+        m = re.search(r'da Q(\w+)', subject)
+        pt = m.group(1) if m else ""
+        return True, "OK", f"calc_qs_{pt}"
+    if subject.startswith("Quota Punto"):
+        pt = subject.split()[-1]  # "Quota Punto A" → "A"
+        return True, "OK", f"calc_qp_{pt}"
     return False, "Non disponibile", None
 with col_tutor:
     st.subheader("🎯 Tutor")
@@ -3327,6 +3471,55 @@ with col_tutor:
 &= \mathbf{{{format_angle_output(az, unit, latex=True)}}}
 \end{{aligned}}"""
                                     descr_text = f"Calcolo Azimut {p1}-{p2} con analisi del quadrante e correzione."
+                                elif act=="calc_qs":
+                                    # QS = QP - HS - Delta + HM
+                                    pt_lbl = parts[2]
+                                    pt = st.session_state.points[pt_lbl]
+                                    q_p = st.session_state.points[pt_lbl].get('quota')
+                                    if q_p is None:
+                                        # Recupera da solved_values
+                                        q_p = float(st.session_state.solved_values.get(f"Q_{pt_lbl}", "0").replace(" m",""))
+                                    hs = pt.get('hs', 0.0)
+                                    hm = pt.get('hm', 0.0)
+                                    delta = pt.get('delta', 0.0)
+                                    qs_val = q_p - hs - delta + hm
+                                    st.session_state.solved_items.add("Q_S")
+                                    st.session_state.solved_values["Q_S"] = f"{qs_val:.4f} m"
+                                    # Aggiorna la quota del punto nel dizionario punti
+                                    st.session_state.points[pt_lbl]['quota'] = q_p
+                                    # Calcola anche tutte le altre quote con dati altimetrici
+                                    for lbl2, pt2 in st.session_state.points.items():
+                                        if 'delta' in pt2:
+                                            q2 = qs_val + pt2['hs'] + pt2['delta'] - pt2['hm']
+                                            st.session_state.points[lbl2]['quota'] = q2
+                                            st.session_state.solved_values[f"Q_{lbl2}"] = f"{q2:.4f} m"
+                                            st.session_state.solved_items.add(f"Q_{lbl2}")
+                                    delta_fmt = f"{delta:+.4f}"
+                                    latex_msg = rf"""\begin{{aligned}}
+Q_S &= Q_{{{pt_lbl}}} - HS - \Delta_{{{pt_lbl}}} + HM \\
+&= {q_p:.4f} - {hs:.4f} - ({delta_fmt}) + {hm:.4f} \\
+&= \mathbf{{{qs_val:.4f}\,m}}
+\end{{aligned}}"""
+                                    descr_text = f"Calcolo Quota Stazione dalla quota nota del punto {pt_lbl}."
+                                elif act=="calc_qp":
+                                    # QP = QS + HS + Delta - HM
+                                    pt_lbl = parts[2]
+                                    pt = st.session_state.points[pt_lbl]
+                                    qs_val = float(st.session_state.solved_values.get("Q_S", "0").replace(" m",""))
+                                    hs = pt.get('hs', 0.0)
+                                    hm = pt.get('hm', 0.0)
+                                    delta = pt.get('delta', 0.0)
+                                    qp_val = qs_val + hs + delta - hm
+                                    st.session_state.solved_items.add(f"Q_{pt_lbl}")
+                                    st.session_state.solved_values[f"Q_{pt_lbl}"] = f"{qp_val:.4f} m"
+                                    st.session_state.points[pt_lbl]['quota'] = qp_val
+                                    delta_fmt = f"{delta:+.4f}"
+                                    latex_msg = rf"""\begin{{aligned}}
+Q_{{{pt_lbl}}} &= Q_S + HS + \Delta_{{{pt_lbl}}} - HM \\
+&= {qs_val:.4f} + {hs:.4f} + ({delta_fmt}) - {hm:.4f} \\
+&= \mathbf{{{qp_val:.4f}\,m}}
+\end{{aligned}}"""
+                                    descr_text = f"Calcolo Quota del Punto {pt_lbl} dalla Quota Stazione."
                                 elif act=="calc_poly":
                                     pts_lbls = sorted(st.session_state.points.keys())
                                     if parts[2] == "area":
@@ -3629,3 +3822,277 @@ with col_tutor:
                                     'is_error': True
                                 })
                                 st.error("Strategia errata.")
+
+# ─────────────────────────────────────────────────────────────────
+# SEZIONE DEDICATA: CALCOLO QUOTE
+# Appare solo se ci sono dati altimetrici caricati
+# ─────────────────────────────────────────────────────────────────
+_pts_alti = {lbl: pt for lbl, pt in st.session_state.points.items() if 'delta' in pt}
+
+if _pts_alti:
+    with col_tutor:
+        st.divider()
+        st.markdown("### 📐 Calcolo Quote")
+
+        # Costruisci lista opzioni per la casella a discesa
+        _opt_quote = []
+
+        # Opzione QS: disponibile se c'è almeno un punto con quota nota e QS non è ancora calcolata
+        if "Q_S" not in st.session_state.solved_items:
+            for _lbl in sorted(_pts_alti.keys()):
+                if f"Q_{_lbl}" in st.session_state.solved_items:
+                    _opt_quote.append(f"Quota Stazione QS  (nota: Q{_lbl})")
+
+        # Opzioni QP: disponibili una alla volta dopo che QS è nota
+        if "Q_S" in st.session_state.solved_items:
+            for _lbl in sorted(_pts_alti.keys()):
+                if f"Q_{_lbl}" not in st.session_state.solved_items:
+                    _opt_quote.append(f"Quota Punto {_lbl}")
+
+        if not _opt_quote:
+            # Tutte le quote calcolate
+            _q_lines = []
+            if "Q_S" in st.session_state.solved_values:
+                _q_lines.append(f"**QS** = {st.session_state.solved_values['Q_S']}")
+            for _lbl in sorted(_pts_alti.keys()):
+                _qk = f"Q_{_lbl}"
+                if _qk in st.session_state.solved_values:
+                    _q_lines.append(f"**Q{_lbl}** = {st.session_state.solved_values[_qk]}")
+            st.success("✅ Tutte le quote calcolate!")
+            for _ql in _q_lines:
+                st.write(_ql)
+
+        else:
+            # Mostra dati già calcolati
+            _known = []
+            if "Q_S" in st.session_state.solved_values:
+                _known.append(f"QS = {st.session_state.solved_values['Q_S']}")
+            for _lbl in sorted(_pts_alti.keys()):
+                if f"Q_{_lbl}" in st.session_state.solved_values:
+                    _known.append(f"Q{_lbl} = {st.session_state.solved_values[f'Q_{_lbl}']}")
+            if _known:
+                st.caption("📋 Note: " + "  |  ".join(_known))
+
+            # Casella a discesa dedicata
+            _sel_quota = st.selectbox("Calcola:", _opt_quote, key="quota_selectbox")
+
+            # Genera opzioni quiz per la selezione corrente
+            import random as _rnd
+
+            if "Quota Stazione" in _sel_quota:
+                # Estrai punto noto dal testo "Quota Stazione QS  (nota: QA)"
+                import re as _re
+                _m = _re.search(r'nota: Q(\w+)', _sel_quota)
+                _pt_noto = _m.group(1) if _m else list(_pts_alti.keys())[0]
+                _mission = f"calc_qs_{_pt_noto}"
+                _correct = rf"$Q_S = Q_{{{_pt_noto}}} - HS - \Delta_{{{_pt_noto}}} + HM$"
+                _wrongs = [
+                    rf"$Q_S = Q_{{{_pt_noto}}} + HS + \Delta_{{{_pt_noto}}} - HM$",
+                    rf"$Q_S = Q_{{{_pt_noto}}} + HS - \Delta_{{{_pt_noto}}} + HM$",
+                    rf"$Q_S = Q_{{{_pt_noto}}} - HS + \Delta_{{{_pt_noto}}} - HM$",
+                ]
+                _desc = f"Calcola QS usando la quota nota del punto {_pt_noto}"
+            else:
+                # "Quota Punto B"
+                _pt_calc = _sel_quota.split()[-1]
+                _mission = f"calc_qp_{_pt_calc}"
+                _correct = rf"$Q_{{{_pt_calc}}} = Q_S + HS + \Delta_{{{_pt_calc}}} - HM$"
+                _wrongs = [
+                    rf"$Q_{{{_pt_calc}}} = Q_S - HS - \Delta_{{{_pt_calc}}} + HM$",
+                    rf"$Q_{{{_pt_calc}}} = Q_S + HS - \Delta_{{{_pt_calc}}} - HM$",
+                    rf"$Q_{{{_pt_calc}}} = Q_S - HS + \Delta_{{{_pt_calc}}} - HM$",
+                ]
+                _desc = f"Calcola Q{_pt_calc} usando la Quota Stazione"
+
+            # Shuffle opzioni (stabile per la sessione tramite chiave)
+            _quiz_key = f"quota_quiz_{_mission}"
+            if _quiz_key not in st.session_state:
+                _all_opts = [_correct] + _wrongs
+                _rnd.shuffle(_all_opts)
+                st.session_state[_quiz_key] = _all_opts
+            _opts = st.session_state[_quiz_key]
+
+            st.caption(_desc)
+            with st.form(f"form_quota_{_mission}"):
+                _ans = st.radio("Scegli la formula corretta:", _opts, key=f"radio_quota_{_mission}")
+                if st.form_submit_button("✅ Verifica e Calcola"):
+                    if _ans == _correct:
+                        # ── CALCOLO CORRETTO ──
+                        _parts = _mission.split("_")
+                        _act = _parts[0] + "_" + _parts[1]
+                        _pt_lbl = _parts[2]
+                        _pt_data = st.session_state.points[_pt_lbl]
+                        _hs = _pt_data.get('hs', 0.0)
+                        _hm = _pt_data.get('hm', 0.0)
+                        _delta = _pt_data.get('delta', 0.0)
+                        _delta_fmt = f"{_delta:+.4f}"
+
+                        _pre_items = st.session_state.solved_items.copy()
+                        _pre_values = set(st.session_state.solved_values.keys())
+
+                        if _act == "calc_qs":
+                            _q_nota = float(st.session_state.solved_values.get(f"Q_{_pt_lbl}", "0").replace(" m", ""))
+                            _qs_val = _q_nota - _hs - _delta + _hm
+                            st.session_state.solved_items.add("Q_S")
+                            st.session_state.solved_values["Q_S"] = f"{_qs_val:.4f} m"
+                            _latex = rf"""\begin{{aligned}}
+\Delta_{{{_pt_lbl}}} &= DO_{{{_pt_lbl}}} \cdot \tan\!\left(100^g - z_{{{_pt_lbl}}}\right) = {_delta_fmt}\,m \\[4pt]
+Q_S &= Q_{{{_pt_lbl}}} - HS - \Delta_{{{_pt_lbl}}} + HM \\
+     &= {_q_nota:.4f} - {_hs:.4f} - ({_delta_fmt}) + {_hm:.4f} \\
+     &= \mathbf{{{_qs_val:.4f}\,m}}
+\end{{aligned}}"""
+                            _descr = f"Quota Stazione calcolata dalla quota nota del punto {_pt_lbl}."
+                            st.session_state.last_calc_msg = _latex
+
+                        else:  # calc_qp
+                            _qs_val = float(st.session_state.solved_values.get("Q_S", "0").replace(" m", ""))
+                            _qp_val = _qs_val + _hs + _delta - _hm
+                            st.session_state.solved_items.add(f"Q_{_pt_lbl}")
+                            st.session_state.solved_values[f"Q_{_pt_lbl}"] = f"{_qp_val:.4f} m"
+                            st.session_state.points[_pt_lbl]['quota'] = _qp_val
+                            _latex = rf"""\begin{{aligned}}
+\Delta_{{{_pt_lbl}}} &= {_delta_fmt}\,m \\[4pt]
+Q_{{{_pt_lbl}}} &= Q_S + HS + \Delta_{{{_pt_lbl}}} - HM \\
+     &= {_qs_val:.4f} + {_hs:.4f} + ({_delta_fmt}) - {_hm:.4f} \\
+     &= \mathbf{{{_qp_val:.4f}\,m}}
+\end{{aligned}}"""
+                            _descr = f"Quota Punto {_pt_lbl} calcolata dalla Quota Stazione."
+                            st.session_state.last_calc_msg = _latex
+
+                        # Log
+                        _added_items = list(st.session_state.solved_items - _pre_items)
+                        _added_values = list(set(st.session_state.solved_values.keys()) - _pre_values)
+                        st.session_state.log.append({
+                            'action': _desc,
+                            'method': _ans,
+                            'result': _latex,
+                            'desc_verbose': _descr,
+                            'added_items': _added_items,
+                            'added_values': _added_values
+                        })
+                        # Reset quiz per questa missione
+                        st.session_state.pop(_quiz_key, None)
+                        st.balloons()
+                        st.rerun()
+
+                    else:
+                        # ── RISPOSTA SBAGLIATA ──
+                        st.session_state.log.append({
+                            'action': _desc,
+                            'method': _ans,
+                            'result': r'\text{ERRORE: Formula errata}',
+                            'desc_verbose': f"Formula scelta: {_ans}. Formula corretta: {_correct}",
+                            'added_items': [],
+                            'added_values': [],
+                            'is_error': True
+                        })
+                        st.error("❌ Formula sbagliata. Riprova.")
+
+# ─────────────────────────────────────────────────────────────────
+# SEZIONE DEDICATA: CALCOLO PENDENZE
+# La pendenza è DIREZIONALE: i_AB = −i_BA
+# Compaiono entrambe le direzioni come opzioni separate
+# ─────────────────────────────────────────────────────────────────
+import itertools as _itertools_pend
+import random as _rnd_pend
+
+_pend_options = []
+_pts_all = sorted(st.session_state.points.keys())
+
+# Usa permutazioni (A→B e B→A entrambe) per rispettare la direzionalità
+for _p1, _p2 in _itertools_pend.permutations(_pts_all, 2):
+    _q1_known = f"Q_{_p1}" in st.session_state.solved_items
+    _q2_known = f"Q_{_p2}" in st.session_state.solved_items
+    _dist_known = (f"SegDist_{_p1}_{_p2}" in st.session_state.solved_items or
+                   f"SegDist_{_p2}_{_p1}" in st.session_state.solved_items)
+    _pend_known = f"Pend_{_p1}_{_p2}" in st.session_state.solved_items
+    if _q1_known and _q2_known and _dist_known and not _pend_known:
+        _pend_options.append(f"Pendenza {_p1}→{_p2}")
+
+if _pend_options:
+    with col_tutor:
+        st.divider()
+        st.markdown("### 📐 Calcolo Pendenze")
+        st.caption("⚠️ La pendenza è direzionale: i_AB = −i_BA")
+
+        # Riepilogo pendenze già calcolate
+        _pend_known_list = [k for k in st.session_state.solved_items if k.startswith("Pend_")]
+        if _pend_known_list:
+            _pend_lines = []
+            for _pk in sorted(_pend_known_list):
+                _pp = _pk.split("_")
+                _pv = st.session_state.solved_values.get(_pk, "—")
+                _pend_lines.append(f"i<sub>{_pp[1]}→{_pp[2]}</sub> = {_pv}")
+            st.markdown("📋 " + "  |  ".join(_pend_lines), unsafe_allow_html=True)
+
+        _sel_pend = st.selectbox("Calcola:", _pend_options, key="pend_selectbox")
+
+        # Estrai direzione dalla selezione "Pendenza A→B"
+        _pend_pts = _sel_pend.replace("Pendenza ", "").split("→")
+        _pp1, _pp2 = _pend_pts[0].strip(), _pend_pts[1].strip()
+        _mission_pend = f"calc_pend_{_pp1}_{_pp2}"
+
+        # Quiz: formula corretta rispetta l'ordine (pp2 - pp1) / dist
+        _correct_pend = rf"$i_{{{_pp1}\rightarrow{_pp2}}} = \frac{{Q_{{{_pp2}}} - Q_{{{_pp1}}}}}{{\overline{{{_pp1}{_pp2}}}}} \times 100$"
+        _wrongs_pend = [
+            rf"$i_{{{_pp1}\rightarrow{_pp2}}} = \frac{{Q_{{{_pp1}}} - Q_{{{_pp2}}}}}{{\overline{{{_pp1}{_pp2}}}}} \times 100$",   # ordine invertito → risultato opposto
+            rf"$i_{{{_pp1}\rightarrow{_pp2}}} = \frac{{Q_{{{_pp2}}} + Q_{{{_pp1}}}}}{{\overline{{{_pp1}{_pp2}}}}} \times 100$",   # somma invece di differenza
+            rf"$i_{{{_pp1}\rightarrow{_pp2}}} = \frac{{\overline{{{_pp1}{_pp2}}}}}{{Q_{{{_pp2}}} - Q_{{{_pp1}}}}} \times 100$",  # fratto invertito
+        ]
+
+        _pend_quiz_key = f"pend_quiz_{_mission_pend}"
+        if _pend_quiz_key not in st.session_state:
+            _all_pend_opts = [_correct_pend] + _wrongs_pend
+            _rnd_pend.shuffle(_all_pend_opts)
+            st.session_state[_pend_quiz_key] = _all_pend_opts
+        _pend_opts = st.session_state[_pend_quiz_key]
+
+        st.caption(f"Pendenza da {_pp1} verso {_pp2} (positiva = salita, negativa = discesa)")
+
+        with st.form(f"form_pend_{_mission_pend}"):
+            _ans_pend = st.radio("Scegli la formula corretta:", _pend_opts, key=f"radio_pend_{_mission_pend}")
+            if st.form_submit_button("✅ Verifica e Calcola"):
+                if _ans_pend == _correct_pend:
+                    _q1_val = float(st.session_state.solved_values.get(f"Q_{_pp1}", "0").replace(" m", ""))
+                    _q2_val = float(st.session_state.solved_values.get(f"Q_{_pp2}", "0").replace(" m", ""))
+                    _dk = (f"SegDist_{_pp1}_{_pp2}" if f"SegDist_{_pp1}_{_pp2}" in st.session_state.solved_values
+                           else f"SegDist_{_pp2}_{_pp1}")
+                    _dist_val = float(st.session_state.solved_values.get(_dk, "0"))
+                    _delta_q = _q2_val - _q1_val
+                    _raw_pend = _delta_q / _dist_val if _dist_val != 0 else 0
+                    _pend_pct = _raw_pend * 100
+                    _verso = "salita ↑" if _pend_pct > 0 else ("discesa ↓" if _pend_pct < 0 else "piano")
+
+                    _k_pend = f"Pend_{_pp1}_{_pp2}"
+                    st.session_state.solved_items.add(_k_pend)
+                    st.session_state.solved_values[_k_pend] = f"{_pend_pct:+.2f}%"
+
+                    _latex_pend = rf"""\begin{{aligned}}
+i_{{{_pp1}\rightarrow{_pp2}}} &= \frac{{Q_{{{_pp2}}} - Q_{{{_pp1}}}}}{{\overline{{{_pp1}{_pp2}}}}} \times 100 \\
+&= \frac{{{_q2_val:.4f} - {_q1_val:.4f}}}{{{_dist_val:.4f}}} \times 100 \\
+&= \frac{{{_delta_q:+.4f}}}{{{_dist_val:.4f}}} \times 100 \\
+&= {_raw_pend:.6f} \times 100 \\
+&= \mathbf{{{_pend_pct:+.2f}\,\%}} \quad ({_verso})
+\end{{aligned}}"""
+
+                    st.session_state.last_calc_msg = _latex_pend
+                    st.session_state.log.append({
+                        'action': f"Pendenza {_pp1}→{_pp2}",
+                        'method': _ans_pend,
+                        'result': _latex_pend,
+                        'desc_verbose': f"i_{_pp1}→{_pp2} = (Q{_pp2}−Q{_pp1}) / d{_pp1}{_pp2} × 100 = {_pend_pct:+.2f}% ({_verso})",
+                        'added_items': [_k_pend],
+                        'added_values': [_k_pend],
+                    })
+                    st.session_state.pop(_pend_quiz_key, None)
+                    st.balloons()
+                    st.rerun()
+                else:
+                    st.session_state.log.append({
+                        'action': f"Pendenza {_pp1}→{_pp2}",
+                        'method': _ans_pend,
+                        'result': r'\text{ERRORE: Formula errata}',
+                        'desc_verbose': f"Formula scelta: {_ans_pend}. Corretta: {_correct_pend}",
+                        'added_items': [], 'added_values': [], 'is_error': True
+                    })
+                    st.error("❌ Formula sbagliata. Riprova.")
